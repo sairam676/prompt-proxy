@@ -79,22 +79,29 @@ export const runInterviewTurn = async (userMessage, history = []) => {
 
   const reply = response.choices[0].message.content.trim();
 
-  try {
-    const parsed = JSON.parse(reply);
-    if (parsed.ready && parsed.structured_context) {
-      return {
-        done:    true,
-        context: parsed.structured_context,
-        history: updatedHistory,
-        usage:   response.usage,
-      };
-    }
-  } catch (_) {}
+  // Try to extract JSON even if mixed with text
+  const jsonMatch = reply.match(/\{[\s\S]*"ready"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.ready && parsed.structured_context) {
+        return {
+          done:    true,
+          context: parsed.structured_context,
+          history: updatedHistory,
+          usage:   response.usage,
+        };
+      }
+    } catch (_) {}
+  }
+
+  // Strip any JSON blob from the question before showing to user
+  const cleanReply = reply.replace(/\{[\s\S]*\}/, "").trim();
 
   const nextHistory = [...updatedHistory, { role: "assistant", content: reply }];
   return {
     done:     false,
-    question: reply,
+    question: cleanReply || reply,
     history:  nextHistory,
     usage:    response.usage,
   };
@@ -121,19 +128,24 @@ export const forceExtractContext = async (history) => {
 
   const reply = response.choices[0].message.content.trim();
 
-  try {
-    const parsed = JSON.parse(reply);
-    return parsed.structured_context ?? parsed;
-  } catch (_) {
-    const lastUser = [...history].reverse().find((m) => m.role === "user");
-    return {
-      goal:           lastUser?.content ?? "complete the user's request",
-      audience:       null,
-      tone:           null,
-      format:         null,
-      constraints:    null,
-      domain_context: null,
-      raw_intent:     lastUser?.content ?? "",
-    };
+  // Extract JSON even if mixed with text
+  const jsonMatch = reply.match(/\{[\s\S]*"structured_context"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return parsed.structured_context ?? parsed;
+    } catch (_) {}
   }
+
+  // Last resort fallback
+  const lastUser = [...history].reverse().find((m) => m.role === "user");
+  return {
+    goal:           lastUser?.content ?? "complete the user's request",
+    audience:       null,
+    tone:           null,
+    format:         null,
+    constraints:    null,
+    domain_context: null,
+    raw_intent:     lastUser?.content ?? "",
+  };
 };
