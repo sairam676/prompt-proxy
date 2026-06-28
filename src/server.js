@@ -7,7 +7,12 @@ import chatRouter       from "./routes/chat.js";
 const app  = express();
 const PORT = process.env.PORT ?? 3000;
 
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://prompt-proxy-mocha.vercel.app"
+  ]
+}));
 app.use(express.json());
 app.use("/api/chat", chatRouter);
 app.get("/health", (_, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
