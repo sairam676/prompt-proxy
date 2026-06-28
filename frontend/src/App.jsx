@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-
-const API = "http://localhost:3000/api/chat";
+const API = "https://prompt-proxy.onrender.com/api/chat";
 const MAX_TURNS = 4;
 
 const TASK_META = {
