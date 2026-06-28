@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "ms-vscode.vscode-js-debug",
+    "cweijan.vscode-redis-client",
+    "humao.rest-client"
+  ]
+}

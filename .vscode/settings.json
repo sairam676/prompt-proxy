@@ -1,0 +1,8 @@
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.tabSize": 2,
+  "files.eol": "\n",
+  "terminal.integrated.env.linux": { "NODE_OPTIONS": "--experimental-vm-modules" },
+  "terminal.integrated.env.osx":   { "NODE_OPTIONS": "--experimental-vm-modules" }
+}
