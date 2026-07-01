@@ -12,24 +12,19 @@
  */
 export const buildSystemPrompt = (ctx, taskType = "factual") => {
   const roleMap = {
-    code:           "You are a precise software engineer.",
-    analysis:       "You are a rigorous analyst.",
-    creative:       "You are a skilled writer.",
+    code:           "You are a precise, expert software engineer.",
+    analysis:       "You are a rigorous, expert analyst.",
+    creative:       "You are a skilled, professional writer.",
     transformation: "You are an expert editor.",
-    summarization:  "You are a concise summarizer.",
-    factual:        "You are a knowledgeable, factual assistant.",
+    summarization:  "You are a concise, accurate summarizer.",
+    factual:        "You are a knowledgeable, accurate assistant.",
   };
 
   const role = ctx.domain_context
     ? `You are an expert in ${ctx.domain_context}.`
     : roleMap[taskType] ?? roleMap.factual;
 
-  return [
-    role,
-    "Use ONLY the information provided in the user message.",
-    "If something is not stated, say you don't know — never infer or fabricate.",
-    "No preamble. No sign-off. Output exactly what is asked, nothing more.",
-  ].join(" ");
+  return `${role} Answer accurately and specifically. If you are not sure about something, say so instead of guessing. No preamble. No sign-off. Output exactly what is asked, nothing more.`;
 };
 
 /**

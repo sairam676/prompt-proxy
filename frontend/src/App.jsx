@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-const API = "https://prompt-proxy.onrender.com/api/chat";
+
+const API = "http://localhost:3000/api/chat";
 const MAX_TURNS = 4;
 
 const TASK_META = {
@@ -19,6 +20,9 @@ export default function App() {
   const [turnCount, setTurnCount] = useState(0);
   const [result, setResult]       = useState(null);
   const [loading, setLoading]     = useState(false);
+  const [criticalWarning, setCriticalWarning] = useState(null);
+  const [showByollmModal, setShowByollmModal] = useState(false);
+  const [byollmConfig, setByollmConfig] = useState(null); // { provider, apiKey, model }
   const bottomRef                 = useRef(null);
   const textareaRef               = useRef(null);
 
@@ -48,7 +52,7 @@ export default function App() {
       if (data.error) throw new Error(data.error);
       setSessionId(data.sessionId);
       if (data.status === "complete") {
-        await executeCall(data.sessionId);
+        setPhase("ready");  // interview done — show execution choice, don't auto-run
       } else {
         addMsg("bot", data.question);
         setTurnCount(data.turnCount ?? 1);
@@ -65,6 +69,27 @@ export default function App() {
     const answer = input.trim();
     setInput(""); setLoading(true);
     addMsg("user", answer);
+
+    // If we're recovering from a critical-info warning, this answer
+    // supplies the missing fact — merge it via /supplement and retry execute.
+    if (criticalWarning) {
+      setCriticalWarning(null);
+      try {
+        const res = await fetch(`${API}/supplement`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, message: answer }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        await executeCall(sessionId);
+      } catch (e) {
+        addMsg("sys", e.message);
+        setPhase("error");
+      } finally { setLoading(false); }
+      return;
+    }
+
     try {
       const res  = await fetch(`${API}/reply`, {
         method: "POST",
@@ -75,7 +100,7 @@ export default function App() {
       if (data.error) throw new Error(data.error);
       if (data.status === "complete") {
         setTurnCount(MAX_TURNS);
-        await executeCall(sessionId);
+        setPhase("ready");  // interview done — show execution choice
       } else {
         addMsg("bot", data.question);
         setTurnCount(data.turnCount ?? turnCount + 1);
@@ -86,16 +111,27 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
-  const executeCall = async (sid) => {
+  const executeCall = async (sid, mode = "server", byollmConfig = null, forceExecute = false) => {
     setPhase("executing");
     try {
+      const body = { sessionId: sid, mode, forceExecute };
+      if (mode === "byollm" && byollmConfig) body.byollm = byollmConfig;
+
       const res  = await fetch(`${API}/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: sid }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+
+      if (data.status === "needs_critical_info") {
+        setCriticalWarning(data);
+        setPhase("interviewing");
+        addMsg("bot", data.warningMessage);
+        return;
+      }
+
       setResult(data);
       setPhase("done");
     } catch (e) {
@@ -192,12 +228,33 @@ export default function App() {
           {/* Result */}
           {result && <ResultCard result={result} />}
 
+          {/* Execution choice — shown once interview is complete */}
+          {phase === "ready" && (
+            <ExecutionChoice
+              onPromptOnly={() => executeCall(sessionId, "prompt_only")}
+              onServer={()    => executeCall(sessionId, "server")}
+              onByollm={()    => setShowByollmModal(true)}
+            />
+          )}
+
+          {/* BYOLLM connect modal */}
+          {showByollmModal && (
+            <ByollmModal
+              onCancel={() => setShowByollmModal(false)}
+              onConnect={(config) => {
+                setByollmConfig(config);
+                setShowByollmModal(false);
+                executeCall(sessionId, "byollm", config);
+              }}
+            />
+          )}
+
           <div ref={bottomRef} style={{ height: 1 }} />
         </div>
       </main>
 
       {/* ── Input bar ── */}
-      {phase !== "done" && (
+      {phase !== "done" && phase !== "ready" && (
         <footer style={S.footer}>
           <div style={S.inputWrap}>
             <textarea
@@ -224,7 +281,11 @@ export default function App() {
               </svg>
             </button>
           </div>
-          <p style={S.footerHint}>Enter to send · Shift+Enter for new line</p>
+          <p style={S.footerHint}>
+            {criticalWarning
+              ? <>Missing info increases hallucination risk. <button style={S.forceLink} onClick={() => executeCall(sessionId, "server", null, true)}>Proceed anyway →</button></>
+              : "Enter to send · Shift+Enter for new line"}
+          </p>
         </footer>
       )}
 
@@ -261,13 +322,113 @@ function Message({ msg, isLast }) {
 }
 
 // ── Result card ────────────────────────────────────────────────────────────────
+// ── Execution choice ──────────────────────────────────────────────────────────
+// Shown once the interview is done. Our LLM only ever does extraction —
+// this is where the user decides who runs the actual final prompt.
+function ExecutionChoice({ onPromptOnly, onServer, onByollm }) {
+  return (
+    <div style={EC.card}>
+      <p style={EC.title}>Context locked in. Where should this run?</p>
+      <div style={EC.options}>
+        <button style={EC.option} onClick={onPromptOnly}>
+          <span style={EC.optionTitle}>Copy the prompt</span>
+          <span style={EC.optionSub}>Paste it anywhere yourself — ChatGPT, Claude.ai, Cursor</span>
+        </button>
+        <button style={EC.option} onClick={onByollm}>
+          <span style={EC.optionTitle}>Use my own API key</span>
+          <span style={EC.optionSub}>Connect Claude or OpenAI — runs on your account, your credits</span>
+        </button>
+        <button style={{ ...EC.option, ...EC.optionPrimary }} onClick={onServer}>
+          <span style={EC.optionTitle}>Run it now</span>
+          <span style={EC.optionSub}>Use our connected model — fastest option</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── BYOLLM connect modal ──────────────────────────────────────────────────────
+function ByollmModal({ onCancel, onConnect }) {
+  const [provider, setProvider] = useState("claude");
+  const [apiKey, setApiKey]     = useState("");
+  const [validating, setValidating] = useState(false);
+  const [error, setError]       = useState(null);
+
+  const handleConnect = async () => {
+    if (!apiKey.trim()) { setError("Enter an API key"); return; }
+    setValidating(true); setError(null);
+    try {
+      const res  = await fetch(`${API}/validate-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, apiKey: apiKey.trim() }),
+      });
+      const data = await res.json();
+      if (!data.valid) { setError(data.error ?? "Key validation failed"); return; }
+      onConnect({ provider, apiKey: apiKey.trim() });
+    } catch (e) {
+      setError(e.message);
+    } finally { setValidating(false); }
+  };
+
+  return (
+    <div style={BM.overlay} onClick={onCancel}>
+      <div style={BM.modal} onClick={e => e.stopPropagation()}>
+        <p style={BM.title}>Connect your account</p>
+        <p style={BM.sub}>Your key is used for this request only — never stored.</p>
+
+        <div style={BM.providerRow}>
+          {["claude", "openai"].map(p => (
+            <button
+              key={p}
+              style={{ ...BM.providerBtn, ...(provider === p ? BM.providerBtnActive : {}) }}
+              onClick={() => setProvider(p)}
+            >
+              {p === "claude" ? "Claude" : "OpenAI"}
+            </button>
+          ))}
+        </div>
+
+        <input
+          type="password"
+          style={BM.input}
+          placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
+          value={apiKey}
+          onChange={e => setApiKey(e.target.value)}
+        />
+        {error && <p style={BM.error}>{error}</p>}
+
+        <div style={BM.actions}>
+          <button style={BM.cancelBtn} onClick={onCancel}>Cancel</button>
+          <button style={BM.connectBtn} onClick={handleConnect} disabled={validating}>
+            {validating ? "Validating..." : "Connect & run"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ResultCard({ result }) {
   const { response, savings, actualTokens, taskType, classification,
           budgetCheck, optimizedPrompt, systemPrompt, cacheHit,
-          interviewerTokensUsed } = result;
+          interviewerTokensUsed, complexity, decisionReasoning, steps,
+          hallucinationRisk, mode } = result;
 
   const meta = TASK_META[taskType] ?? { label: taskType, color: "#475569" };
-  const [showPrompt, setShowPrompt] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(mode === "prompt_only"); // open by default in prompt-only mode
+  const [showSteps, setShowSteps]   = useState(false);
+  const [copied, setCopied]         = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(optimizedPrompt);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const complexityColor = complexity === "complex" ? { bg:"#fef3c7", fg:"#92400e" }
+    : complexity === "simple" ? { bg:"#d1fae5", fg:"#065f46" }
+    : { bg:"#ede9fe", fg:"#5b21b6" };
 
   return (
     <div style={R.card}>
@@ -277,18 +438,76 @@ function ResultCard({ result }) {
           <span style={{ ...R.taskChip, background: meta.color + "15", color: meta.color }}>
             {meta.label}
           </span>
+          {complexity && (
+            <span style={{ ...R.taskChip, background: complexityColor.bg, color: complexityColor.fg }}>
+              {complexity}
+            </span>
+          )}
           <span style={R.confText}>{classification?.confidence} confidence</span>
           {cacheHit && <span style={R.cacheChip}>⚡ cached</span>}
+          {hallucinationRisk && (
+            <span style={{ ...R.cacheChip, background: hallucinationRisk.level === "low" ? "#d1fae5" : hallucinationRisk.level === "medium" ? "#fef3c7" : "#fee2e2", color: hallucinationRisk.level === "low" ? "#065f46" : hallucinationRisk.level === "medium" ? "#92400e" : "#991b1b" }}>
+              {hallucinationRisk.level} risk
+            </span>
+          )}
         </div>
-        <button style={R.promptToggle} onClick={() => setShowPrompt(v => !v)}>
-          {showPrompt ? "Hide" : "View"} prompt
-        </button>
+        <div style={{ display:"flex", gap:8 }}>
+          {steps?.length > 0 && (
+            <button style={R.promptToggle} onClick={() => setShowSteps(v => !v)}>
+              {showSteps ? "Hide" : "View"} {steps.length} steps
+            </button>
+          )}
+          <button style={R.promptToggle} onClick={() => setShowPrompt(v => !v)}>
+            {showPrompt ? "Hide" : "View"} prompt
+          </button>
+        </div>
       </div>
 
-      {/* Response */}
-      <div style={R.responseArea}>
-        <p style={R.responseText}>{response}</p>
-      </div>
+      {/* Decision reasoning */}
+      {decisionReasoning && (
+        <div style={R.decisionBar}>
+          <span style={R.decisionIcon}>⚡</span>
+          <span style={R.decisionText}>{decisionReasoning}</span>
+        </div>
+      )}
+
+      {/* Response — or, in prompt_only mode, a copyable prompt box instead */}
+      {mode === "prompt_only" ? (
+        <div style={R.copyArea}>
+          <div style={R.copyHeader}>
+            <span style={R.promptLabel}>OPTIMIZED PROMPT — READY TO PASTE</span>
+            <button style={R.copyBtn} onClick={handleCopy}>{copied ? "Copied" : "Copy"}</button>
+          </div>
+          <pre style={R.copyPre}>{optimizedPrompt}</pre>
+          {systemPrompt && (
+            <>
+              <div style={{ ...R.promptLabel, marginTop: 14 }}>SYSTEM PROMPT (optional, for APIs that support it)</div>
+              <pre style={R.copyPre}>{systemPrompt}</pre>
+            </>
+          )}
+        </div>
+      ) : (
+        <div style={R.responseArea}>
+          <p style={R.responseText}>{response}</p>
+        </div>
+      )}
+
+      {/* Subtask chain */}
+      {showSteps && steps?.length > 0 && (
+        <div style={R.stepsArea}>
+          <div style={R.promptLabel}>REASONING CHAIN</div>
+          {steps.map(step => (
+            <div key={step.id} style={R.step}>
+              <div style={R.stepHeader}>
+                <span style={R.stepNum}>{step.id}</span>
+                <span style={R.stepName}>{step.name}</span>
+                <span style={R.stepTokens}>{step.tokens} tok · {step.model}</span>
+              </div>
+              <p style={R.stepOutput}>{step.output}</p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Prompt preview */}
       {showPrompt && (
@@ -426,6 +645,7 @@ const S = {
   textarea:     { flex:1, resize:"none", border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:"#111827", background:"#fff", outline:"none", lineHeight:1.5, transition:"border-color 0.15s" },
   sendBtn:      { width:38, height:38, flexShrink:0, background:"#111827", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", transition:"opacity 0.15s" },
   footerHint:   { maxWidth:680, margin:"8px auto 0", fontSize:11, color:"#d1d5db" },
+  forceLink:    { background:"none", border:"none", color:"#d97706", fontSize:11, cursor:"pointer", padding:0, textDecoration:"underline" },
 };
 
 const M = {
@@ -440,20 +660,34 @@ const M = {
 };
 
 const R = {
-  card:         { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:20, animation:"fadeUp 0.25s ease" },
-  cardHeader:   { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 20px", borderBottom:"1px solid #f3f4f6" },
+  card:          { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:20, animation:"fadeUp 0.25s ease" },
+  cardHeader:    { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 20px", borderBottom:"1px solid #f3f4f6" },
   cardHeaderLeft:{ display:"flex", alignItems:"center", gap:8 },
-  taskChip:     { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
-  confText:     { fontSize:11, color:"#9ca3af" },
-  cacheChip:    { fontSize:11, color:"#059669", background:"#d1fae5", padding:"2px 8px", borderRadius:20 },
-  promptToggle: { fontSize:11, color:"#6b7280", background:"transparent", border:"1px solid #e5e7eb", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
-  responseArea: { padding:"20px 20px 16px" },
-  responseText: { fontSize:14, lineHeight:1.8, color:"#111827", whiteSpace:"pre-wrap" },
-  promptArea:   { padding:"0 20px 16px", borderTop:"1px solid #f3f4f6", paddingTop:16 },
-  promptLabel:  { fontSize:10, fontWeight:600, color:"#9ca3af", letterSpacing:1, marginBottom:6 },
-  pre:          { fontSize:12, fontFamily:MONO, color:"#374151", background:"#f9fafb", border:"1px solid #f3f4f6", borderRadius:6, padding:"10px 12px", overflowX:"auto", lineHeight:1.6, whiteSpace:"pre-wrap" },
-  warningRow:   { padding:"10px 20px 14px", display:"flex", flexDirection:"column", gap:4 },
-  warning:      { fontSize:12, color:"#d97706" },
+  taskChip:      { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
+  confText:      { fontSize:11, color:"#9ca3af" },
+  cacheChip:     { fontSize:11, color:"#059669", background:"#d1fae5", padding:"2px 8px", borderRadius:20 },
+  promptToggle:  { fontSize:11, color:"#6b7280", background:"transparent", border:"1px solid #e5e7eb", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
+  decisionBar:   { display:"flex", alignItems:"center", gap:8, padding:"7px 20px", background:"#f9fafb", borderBottom:"1px solid #f3f4f6" },
+  decisionIcon:  { fontSize:11 },
+  decisionText:  { fontSize:11, color:"#6b7280" },
+  responseArea:  { padding:"20px 20px 16px" },
+  responseText:  { fontSize:14, lineHeight:1.8, color:"#111827", whiteSpace:"pre-wrap" },
+  stepsArea:     { borderTop:"1px solid #f3f4f6", padding:"14px 20px" },
+  step:          { marginBottom:10, background:"#f9fafb", borderRadius:8, padding:"10px 12px" },
+  stepHeader:    { display:"flex", alignItems:"center", gap:8, marginBottom:6 },
+  stepNum:       { width:18, height:18, background:"#111827", color:"#fff", borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:700, flexShrink:0 },
+  stepName:      { fontSize:12, fontWeight:500, color:"#111827", flex:1 },
+  stepTokens:    { fontSize:10, color:"#9ca3af", fontFamily:MONO },
+  stepOutput:    { fontSize:12, color:"#374151", lineHeight:1.6, whiteSpace:"pre-wrap" },
+  promptArea:    { padding:"0 20px 16px", borderTop:"1px solid #f3f4f6", paddingTop:16 },
+  promptLabel:   { fontSize:10, fontWeight:600, color:"#9ca3af", letterSpacing:1, marginBottom:6 },
+  pre:           { fontSize:12, fontFamily:MONO, color:"#374151", background:"#f9fafb", border:"1px solid #f3f4f6", borderRadius:6, padding:"10px 12px", overflowX:"auto", lineHeight:1.6, whiteSpace:"pre-wrap" },
+  warningRow:    { padding:"10px 20px 14px", display:"flex", flexDirection:"column", gap:4 },
+  warning:       { fontSize:12, color:"#d97706" },
+  copyArea:      { padding:"20px 20px 16px" },
+  copyHeader:    { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 },
+  copyBtn:       { fontSize:11, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, padding:"5px 14px", cursor:"pointer" },
+  copyPre:       { fontSize:12, fontFamily:MONO, color:"#111827", background:"#f9fafb", border:"1px solid #e5e7eb", borderRadius:8, padding:"14px 16px", overflowX:"auto", lineHeight:1.7, whiteSpace:"pre-wrap" },
 };
 
 const T = {
@@ -469,4 +703,31 @@ const T = {
   metric:      { display:"flex", flexDirection:"column", gap:2 },
   metricVal:   { fontSize:13, fontWeight:500, fontFamily:MONO },
   metricLabel: { fontSize:10, color:"#9ca3af" },
+};
+
+// ── Execution choice styles ───────────────────────────────────────────────────
+const EC = {
+  card:        { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:20, marginBottom:20, animation:"fadeUp 0.25s ease" },
+  title:       { fontSize:14, fontWeight:500, color:"#111827", marginBottom:14 },
+  options:     { display:"flex", flexDirection:"column", gap:8 },
+  option:      { display:"flex", flexDirection:"column", alignItems:"flex-start", gap:3, padding:"12px 16px", borderRadius:8, border:"1px solid #e5e7eb", background:"#fff", cursor:"pointer", textAlign:"left", transition:"border-color 0.15s" },
+  optionPrimary:{ background:"#111827", border:"1px solid #111827" },
+  optionTitle: { fontSize:13, fontWeight:500, color:"#111827" },
+  optionSub:   { fontSize:11, color:"#9ca3af" },
+};
+
+// ── BYOLLM modal styles ────────────────────────────────────────────────────────
+const BM = {
+  overlay:     { position:"static", display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(0,0,0,0.45)", borderRadius:12, padding:"40px 20px", marginBottom:20 },
+  modal:       { background:"#fff", borderRadius:12, padding:24, maxWidth:340, width:"100%" },
+  title:       { fontSize:14, fontWeight:500, color:"#111827", marginBottom:4 },
+  sub:         { fontSize:11, color:"#9ca3af", marginBottom:16 },
+  providerRow: { display:"flex", gap:8, marginBottom:12 },
+  providerBtn: { flex:1, padding:"8px 0", fontSize:12, fontWeight:500, border:"1px solid #e5e7eb", borderRadius:6, background:"#fff", color:"#6b7280", cursor:"pointer" },
+  providerBtnActive: { background:"#111827", color:"#fff", border:"1px solid #111827" },
+  input:       { width:"100%", padding:"10px 12px", fontSize:13, border:"1px solid #e5e7eb", borderRadius:6, outline:"none", fontFamily:"monospace", marginBottom:8 },
+  error:       { fontSize:11, color:"#dc2626", marginBottom:8 },
+  actions:     { display:"flex", gap:8, marginTop:8 },
+  cancelBtn:   { flex:1, padding:"9px 0", fontSize:12, color:"#6b7280", background:"#fff", border:"1px solid #e5e7eb", borderRadius:6, cursor:"pointer" },
+  connectBtn:  { flex:1, padding:"9px 0", fontSize:12, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, cursor:"pointer" },
 };
