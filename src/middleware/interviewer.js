@@ -1,84 +1,67 @@
-/**
- * interviewer.js
- * The middleware LLM — asks targeted questions to extract structured context.
- * Uses claude-haiku (cheap) — intelligence not needed here, structure is.
- *
- * Key design: one system prompt is the ONLY maintenance surface.
- * No per-domain rules. Haiku figures out what's missing from any task.
- */
-
 import Groq from "groq-sdk";
 const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export const MAX_TURNS = 4;
 
-// ── The core system prompt ────────────────────────────────────────────────────
-// This is your IP. Tune this, not individual task handlers.
+/**
+ * CORE PHILOSOPHY:
+ * The middleware acts like a senior engineer briefing an expert consultant.
+ * Before the expensive LLM sees anything, we extract:
+ *   - What exactly is the problem / goal
+ *   - What the user has already (code, error, context)
+ *   - What was already tried
+ *   - What "done" looks like
+ *
+ * This means the big LLM gets ONE perfect request instead of
+ * 10 vague back-and-forth messages — saving hours of debugging time
+ * and 60-80% of tokens.
+ */
 
 const INTERVIEWER_SYSTEM_PROMPT = `
-You are a context extraction agent. Your job is to ask the user for information 
-that ONLY THEY know — facts that cannot be found on the internet or inferred from 
-general knowledge. This is what prevents the LLM from hallucinating.
+You are a senior engineer helping someone prepare a perfect brief for an expert AI consultant.
+Your job: ask targeted questions to extract everything the consultant needs to solve this 
+in ONE shot — no follow-ups, no guessing, no hallucination.
 
-## THE GOLDEN RULE:
-Ask for USER-SPECIFIC facts first. These are things like:
-- Their actual code, error message, stack trace
-- Their project name, what it does, GitHub link, tech stack
-- Their company, role, audience, relationship
-- Their specific numbers, versions, constraints
-- What they have already tried
+Think about what a senior engineer would ask before escalating a problem:
+- What exactly is the goal or problem? (not a paraphrase — the exact thing)
+- What does the user already have? (existing code, error message, current output)
+- What have they already tried? (so we don't repeat failed solutions)
+- What does success look like? (expected output, format, constraints)
+- What context is unique to them? (their stack, version, environment, project details)
 
-## LAZY LADDER — before asking anything, check:
-1. Is the goal 100% clear?                    → if not, ask about it first
-2. Are there user-specific facts missing?     → if yes, ask for them NOW
-3. Is the format/length obvious?              → if not, ask
-4. Do I have enough to build a complete prompt with ZERO assumptions? → if yes, output JSON
+Rules:
+1. NEVER attempt to solve the task yourself.
+2. Ask ONE focused question at a time.
+3. Maximum 3 questions. If you have enough — stop and output JSON.
+4. Only ask what you cannot infer. Don't ask about things that are obvious.
+5. If the user gives rich context upfront — output JSON immediately, no questions needed.
+6. Questions should feel natural, like a colleague asking — not a form.
 
-## RULES:
-1. NEVER answer the task yourself.
-2. Ask ONE question at a time.
-3. Maximum 3 questions. Stop earlier if you have enough.
-4. NEVER ask about things you can infer (tone of a LinkedIn post = professional, code = concise)
-5. If the user gives you enough specifics upfront — output JSON immediately, no questions.
-
-## WHAT CAUSES HALLUCINATION (always extract these if relevant):
-- Missing actual code/error → LLM guesses the bug
-- Missing project description → LLM invents features  
-- Missing real numbers/metrics → LLM makes up statistics
-- Missing existing context → LLM assumes from scratch
-- Missing what was tried → LLM repeats failed solutions
-
-## OUTPUT JSON when ready — nothing else before or after:
+When you have enough to write a complete, unambiguous brief, output ONLY this JSON:
 {
   "ready": true,
   "structured_context": {
-    "goal": "specific verb-led task",
-    "audience": null,
-    "tone": null,
-    "format": null,
-    "constraints": null,
-    "domain_context": null,
-    "raw_intent": "user's original words verbatim",
-    "complexity": "simple|medium|complex",
-    "user_specifics": "all the user-specific facts collected"
+    "goal": "exact task or problem — verb-led, specific",
+    "existing_context": "what they already have — code snippet, current state, error message",
+    "already_tried": "what approaches have already failed, if any",
+    "expected_output": "what success looks like — format, behavior, result",
+    "constraints": "stack, version, platform, word limit, language, etc",
+    "domain": "subject area, technology, or field",
+    "raw_intent": "user's original message verbatim",
+    "complexity": "simple|medium|complex"
   }
 }
+
+Set any field to null if not relevant or not mentioned.
+Output ONLY the JSON when ready — no text before or after.
 `.trim();
 
-// ── Single interview turn ─────────────────────────────────────────────────────
-
-/**
- * Run one turn of the interview.
- * @param {string} userMessage  Latest message from user
- * @param {Array}  history      Full prior [{role, content}] pairs
- * @returns {{ done, question?, context?, history, usage }}
- */
 export const runInterviewTurn = async (userMessage, history = []) => {
   const updatedHistory = [...history, { role: "user", content: userMessage }];
 
   const response = await client.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
-    messages: [
+    model:      "llama-3.3-70b-versatile",
+    messages:   [
       { role: "system", content: INTERVIEWER_SYSTEM_PROMPT },
       ...updatedHistory,
     ],
@@ -87,7 +70,7 @@ export const runInterviewTurn = async (userMessage, history = []) => {
 
   const reply = response.choices[0].message.content.trim();
 
-  // Try to extract JSON even if mixed with text
+  // Extract JSON even if Llama leaks surrounding text
   const jsonMatch = reply.match(/\{[\s\S]*"ready"[\s\S]*\}/);
   if (jsonMatch) {
     try {
@@ -103,9 +86,7 @@ export const runInterviewTurn = async (userMessage, history = []) => {
     } catch (_) {}
   }
 
-  // Strip any JSON blob from the question before showing to user
   const cleanReply = reply.replace(/\{[\s\S]*\}/, "").trim();
-
   const nextHistory = [...updatedHistory, { role: "assistant", content: reply }];
   return {
     done:     false,
@@ -115,28 +96,22 @@ export const runInterviewTurn = async (userMessage, history = []) => {
   };
 };
 
-
-// ── Force extract (safety valve) ──────────────────────────────────────────────
-
-/**
- * Called when MAX_TURNS is reached without completion.
- * Forces the interviewer to extract whatever context it has.
- * Prevents infinite loops — always returns something usable.
- */
 export const forceExtractContext = async (history) => {
   const response = await client.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
+    model:    "llama-3.3-70b-versatile",
     messages: [
       { role: "system", content: INTERVIEWER_SYSTEM_PROMPT },
       ...history,
-      { role: "user", content: "That's all the information I have. Please output the structured_context JSON now with what you know. Set unknown fields to null." },
+      {
+        role:    "user",
+        content: "That's all the context I have. Build the best brief you can from what I've told you. Set unknown fields to null.",
+      },
     ],
-    max_tokens: 400,
+    max_tokens: 500,
   });
 
   const reply = response.choices[0].message.content.trim();
 
-  // Extract JSON even if mixed with text
   const jsonMatch = reply.match(/\{[\s\S]*"structured_context"[\s\S]*\}/);
   if (jsonMatch) {
     try {
@@ -145,15 +120,15 @@ export const forceExtractContext = async (history) => {
     } catch (_) {}
   }
 
-  // Last resort fallback
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   return {
-    goal:           lastUser?.content ?? "complete the user's request",
-    audience:       null,
-    tone:           null,
-    format:         null,
-    constraints:    null,
-    domain_context: null,
-    raw_intent:     lastUser?.content ?? "",
+    goal:             lastUser?.content ?? "complete the task",
+    existing_context: null,
+    already_tried:    null,
+    expected_output:  null,
+    constraints:      null,
+    domain:           null,
+    raw_intent:       lastUser?.content ?? "",
+    complexity:       "medium",
   };
 };

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 
-const API = "http://localhost:3000/api/chat";
+const API = "https://prompt-proxy.onrender.com/api/chat";
 const MAX_TURNS = 4;
 
 const TASK_META = {
@@ -252,6 +252,26 @@ export default function App() {
           <div ref={bottomRef} style={{ height: 1 }} />
         </div>
       </main>
+
+
+      {/* ── Ready state: show execution choice ── */}
+      {phase === "ready" && (
+        <footer style={S.footer}>
+          <div style={S.readyBox}>
+            <p style={S.readyTitle}>Brief is ready. How do you want to use it?</p>
+            <div style={S.readyBtns}>
+              <button style={S.runBtn} onClick={() => executeCall(sessionId, "server")}>
+                Run it for me
+                <span style={S.runBtnSub}>We call the LLM, show you the result</span>
+              </button>
+              <button style={S.promptBtn} onClick={() => executeCall(sessionId, "prompt_only")}>
+                Give me the prompt
+                <span style={S.promptBtnSub}>Paste it into Claude, GPT, Cursor yourself</span>
+              </button>
+            </div>
+          </div>
+        </footer>
+      )}
 
       {/* ── Input bar ── */}
       {phase !== "done" && phase !== "ready" && (
@@ -646,6 +666,13 @@ const S = {
   sendBtn:      { width:38, height:38, flexShrink:0, background:"#111827", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", transition:"opacity 0.15s" },
   footerHint:   { maxWidth:680, margin:"8px auto 0", fontSize:11, color:"#d1d5db" },
   forceLink:    { background:"none", border:"none", color:"#d97706", fontSize:11, cursor:"pointer", padding:0, textDecoration:"underline" },
+  readyBox:     { maxWidth:680, margin:"0 auto", padding:"20px 0" },
+  readyTitle:   { fontSize:13, color:"#6b7280", marginBottom:14, textAlign:"center" },
+  readyBtns:    { display:"flex", gap:12 },
+  runBtn:       { flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"14px 20px", background:"#111827", color:"#fff", border:"none", borderRadius:10, cursor:"pointer", fontSize:13, fontWeight:500 },
+  runBtnSub:    { fontSize:11, fontWeight:400, opacity:0.6 },
+  promptBtn:    { flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"14px 20px", background:"transparent", color:"#111827", border:"1px solid #e5e7eb", borderRadius:10, cursor:"pointer", fontSize:13, fontWeight:500 },
+  promptBtnSub: { fontSize:11, fontWeight:400, color:"#9ca3af" },
 };
 
 const M = {
