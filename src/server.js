@@ -2,19 +2,18 @@ import "dotenv/config";
 import express    from "express";
 import cors       from "cors";
 import { connectRedis } from "./cache/redis.js";
-import chatRouter       from "./routes/chat.js";
+import chatRouter     from "./routes/chat.js";
+import pipelineRouter from "./routes/pipeline.js";
 
 const app  = express();
 const PORT = process.env.PORT ?? 3000;
 
-app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "https://prompt-proxy-mocha.vercel.app"
-  ]
-}));
+app.use(cors({ origin: ["http://localhost:5173", "https://prompt-proxy-mocha.vercel.app"] }));
 app.use(express.json());
-app.use("/api/chat", chatRouter);
+
+app.use("/api/chat",     chatRouter);
+app.use("/api/pipeline", pipelineRouter);
+
 app.get("/health", (_, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
 
 const start = async () => {

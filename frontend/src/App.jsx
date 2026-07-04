@@ -1,34 +1,30 @@
 import { useState, useRef, useEffect } from "react";
 
-const API = "https://prompt-proxy.onrender.com/api/chat";
+const API = "http://localhost:3000/api/pipeline";
 
-const TASK_META = {
-  code:           { label: "Code",        color: "#6366f1" },
-  analysis:       { label: "Analysis",    color: "#0891b2" },
-  creative:       { label: "Creative",    color: "#d97706" },
-  transformation: { label: "Transform",   color: "#059669" },
-  summarization:  { label: "Summary",     color: "#db2777" },
-  factual:        { label: "Factual",     color: "#475569" },
-};
+// Temp: for testing, user pastes their key once per session
+// Will be replaced with stored encrypted key after auth is built
 
 export default function App() {
-  const [phase, setPhase]         = useState("idle");
-  const [messages, setMessages]   = useState([]);
-  const [input, setInput]         = useState("");
+  const [phase, setPhase]       = useState("idle");       // idle|key|interviewing|running|done|error
+  const [messages, setMessages] = useState([]);
+  const [steps, setSteps]       = useState([]);           // live pipeline steps
+  const [result, setResult]     = useState(null);
+  const [input, setInput]       = useState("");
   const [sessionId, setSessionId] = useState(null);
-  const [result, setResult]       = useState(null);
-  const [loading, setLoading]     = useState(false);
-  const [criticalWarning, setCriticalWarning] = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const [apiKey, setApiKey]     = useState("");
+  const [provider, setProvider] = useState("claude");
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, result, loading]);
-  useEffect(() => { if (!loading) inputRef.current?.focus(); }, [loading]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps, result]);
+  useEffect(() => { if (!loading) inputRef.current?.focus(); }, [loading, phase]);
 
   const addMsg = (role, text) =>
     setMessages(prev => [...prev, { role, text, id: crypto.randomUUID() }]);
 
-  // ── Start ──────────────────────────────────────────────────────────────────
+  // ── Start interview ──────────────────────────────────────────────────────
   const handleStart = async () => {
     if (!input.trim() || loading) return;
     const raw = input.trim();
@@ -43,7 +39,7 @@ export default function App() {
       if (data.error) throw new Error(data.error);
       setSessionId(data.sessionId);
       if (data.status === "complete") {
-        setPhase("ready");
+        setPhase("key");
       } else {
         addMsg("bot", data.question);
         setPhase("interviewing");
@@ -53,28 +49,11 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
-  // ── Reply ──────────────────────────────────────────────────────────────────
+  // ── Reply to interview question ──────────────────────────────────────────
   const handleReply = async (userDone = false) => {
     if (!input.trim() || loading) return;
     const answer = input.trim();
     setInput(""); setLoading(true);
-
-    // Recovering from critical warning — supplement missing fact then build
-    if (criticalWarning) {
-      setCriticalWarning(null);
-      addMsg("user", answer);
-      try {
-        await fetch(`${API}/supplement`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, message: answer }),
-        });
-        await buildPrompt(true);
-      } catch (e) {
-        addMsg("sys", e.message); setPhase("error");
-      } finally { setLoading(false); }
-      return;
-    }
-
     addMsg("user", answer);
     try {
       const res  = await fetch(`${API}/reply`, {
@@ -84,7 +63,7 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (data.status === "complete") {
-        setPhase("ready");
+        setPhase("key");
       } else {
         addMsg("bot", data.question);
       }
@@ -93,114 +72,157 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
-  // ── Build prompt ───────────────────────────────────────────────────────────
-  // This is the product. We build the prompt, user pastes it into their LLM.
-  const buildPrompt = async (force = false) => {
-    setPhase("building");
-    try {
-      const res  = await fetch(`${API}/build`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, forceExecute: force }),
-      });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+  // ── Run the pipeline via SSE ─────────────────────────────────────────────
+  const runPipeline = () => {
+    if (!apiKey.trim()) return;
+    setPhase("running");
+    setSteps([]);
 
-      if (data.status === "needs_critical_info") {
-        setCriticalWarning(data);
-        setPhase("interviewing");
-        addMsg("bot", data.warningMessage);
+    const url = `${API}/run/${sessionId}?provider=${provider}&apiKey=${encodeURIComponent(apiKey)}`;
+    const es  = new EventSource(url);
+
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+
+      if (data.type === "done") {
+        setResult(data.data);
+        setPhase("done");
+        es.close();
         return;
       }
 
-      setResult(data);
-      setPhase("done");
-    } catch (e) {
-      addMsg("sys", `Failed: ${e.message}`); setPhase("error");
-    }
+      if (data.type === "error") {
+        addMsg("sys", data.message);
+        setPhase("error");
+        es.close();
+        return;
+      }
+
+      if (data.type === "needs_info") {
+        addMsg("bot", data.message);
+        setPhase("interviewing");
+        es.close();
+        return;
+      }
+
+      // All other step types — show live in steps feed
+      setSteps(prev => [...prev, data]);
+    };
+
+    es.onerror = () => {
+      addMsg("sys", "Connection lost. Try again.");
+      setPhase("error");
+      es.close();
+    };
   };
 
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      phase === "idle" ? handleStart() : handleReply();
+      if (phase === "idle") handleStart();
+      else if (phase === "interviewing") handleReply();
     }
   };
 
   const reset = () => {
-    setPhase("idle"); setMessages([]); setInput("");
-    setSessionId(null); setResult(null); setCriticalWarning(null);
+    setPhase("idle"); setMessages([]); setSteps([]);
+    setInput(""); setSessionId(null); setResult(null);
   };
 
-  const inputDisabled = loading || phase === "building" || phase === "done" || phase === "ready";
+  const inputDisabled = loading || phase === "running" || phase === "done" || phase === "key";
 
   return (
     <div style={S.shell}>
       {/* Header */}
       <header style={S.header}>
         <div style={S.brand}>
-          <span style={S.brandMark}>PP</span>
-          <span style={S.brandName}>PromptProxy</span>
+          <span style={S.mark}>PP</span>
+          <span style={S.name}>PromptProxy</span>
         </div>
-        <span style={S.tagline}>We build the prompt. You run it on your LLM.</span>
-        {phase === "done" && (
-          <button style={S.newBtn} onClick={reset}>New prompt</button>
-        )}
+        <span style={S.tagline}>We extract. We brief. Your LLM solves it right.</span>
+        {phase === "done" && <button style={S.newBtn} onClick={reset}>New session</button>}
       </header>
 
-      {/* Chat */}
+      {/* Main */}
       <main style={S.main}>
         <div style={S.col}>
+
+          {/* Empty state */}
           {messages.length === 0 && phase === "idle" && (
             <div style={S.empty}>
-              <p style={S.emptyH}>What are you trying to do?</p>
+              <p style={S.emptyH}>What are you stuck on?</p>
               <p style={S.emptyB}>
-                Tell us your task. We'll ask the right questions to extract all the
-                context needed — then build a tight, grounded prompt you can paste
-                into Claude, ChatGPT, Cursor, or any LLM. One shot. No hallucination.
+                Paste your problem, error, or task. We extract the full context,
+                identify the root cause, then send one perfect prompt to your LLM.
+                You get a clear action plan — not a wall of text to decode.
               </p>
               <div style={S.pills}>
-                {["No hallucination","Token-efficient","Works with any LLM","Saves debugging hours"].map(p => (
+                {["Root cause identified","One LLM call","Clear next action","Any domain"].map(p => (
                   <span key={p} style={S.pill}>{p}</span>
                 ))}
               </div>
             </div>
           )}
 
-          {messages.map((m) => <Bubble key={m.id} msg={m} />)}
+          {/* Chat messages */}
+          {messages.map(m => <Bubble key={m.id} msg={m} />)}
 
-          {loading && (
-            <div style={S.thinkRow}>
-              <Dots />
-              <span style={S.thinkLabel}>
-                {phase === "building" ? "Building your prompt..." : "Thinking..."}
-              </span>
+          {/* Loading dots */}
+          {loading && <ThinkingDots />}
+
+          {/* Live pipeline steps */}
+          {steps.length > 0 && (
+            <div style={ST.feed}>
+              {steps.map((step, i) => <StepCard key={i} step={step} />)}
             </div>
           )}
 
-          {result && <PromptCard result={result} />}
+          {/* Running indicator */}
+          {phase === "running" && steps.length === 0 && (
+            <div style={ST.feed}><ThinkingDots label="Starting pipeline..." /></div>
+          )}
+
+          {/* Final result */}
+          {result && <ResultCard result={result} />}
+
           <div ref={bottomRef} style={{ height: 1 }} />
         </div>
       </main>
 
-      {/* Ready — show build button */}
-      {phase === "ready" && !loading && (
+      {/* Key connection screen */}
+      {phase === "key" && (
         <footer style={S.footer}>
-          <div style={S.readyBox}>
-            <p style={S.readyLabel}>Context extracted. Ready to build your prompt.</p>
-            <div style={S.readyRow}>
-              <button style={S.buildBtn} onClick={() => buildPrompt()}>
-                Build prompt →
-              </button>
-              <button style={S.moreBtn} onClick={() => setPhase("interviewing")}>
-                Add more context
+          <div style={S.keyBox}>
+            <p style={S.keyTitle}>Connect your LLM to run the pipeline</p>
+            <p style={S.keySub}>Your key is used for this session only. Never logged or stored on our servers.</p>
+            <div style={S.keyRow}>
+              <div style={S.providerToggle}>
+                {["claude","openai"].map(p => (
+                  <button key={p}
+                    style={{ ...S.providerBtn, ...(provider === p ? S.providerBtnActive : {}) }}
+                    onClick={() => setProvider(p)}>
+                    {p === "claude" ? "Claude" : "OpenAI"}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="password"
+                style={S.keyInput}
+                placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && runPipeline()}
+              />
+              <button style={S.runBtn} onClick={runPipeline} disabled={!apiKey.trim()}>
+                Run →
               </button>
             </div>
           </div>
         </footer>
       )}
 
-      {/* Input */}
-      {phase !== "done" && phase !== "ready" && (
+      {/* Input bar */}
+      {phase !== "done" && phase !== "key" && phase !== "running" && (
         <footer style={S.footer}>
           <div style={S.inputRow}>
             <textarea
@@ -210,10 +232,8 @@ export default function App() {
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKey}
               placeholder={
-                phase === "idle"     ? "Describe your task, paste code, or drop an error..." :
-                phase === "building" ? "Building..." :
-                criticalWarning      ? "Paste the missing info here..." :
-                                       "Your answer..."
+                phase === "idle" ? "Paste your problem, error, code, or task..." :
+                                   "Your answer..."
               }
               disabled={inputDisabled}
               rows={2}
@@ -226,21 +246,14 @@ export default function App() {
               <Arrow />
             </button>
           </div>
-          <div style={S.hintRow}>
-            {phase === "interviewing" && !criticalWarning && (
-              <>
-                <span style={S.hint}>Enter to send · Shift+Enter for new line</span>
-                <button style={S.skipBtn} onClick={() => handleReply(true)}>
-                  That's all I have →
-                </button>
-              </>
-            )}
-            {criticalWarning && (
-              <button style={S.forceBtn} onClick={() => buildPrompt(true)}>
-                Skip and build anyway (higher hallucination risk)
+          {phase === "interviewing" && (
+            <div style={S.hintRow}>
+              <span style={S.hint}>Enter to send</span>
+              <button style={S.skipBtn} onClick={() => handleReply(true)}>
+                That's all I have →
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </footer>
       )}
 
@@ -249,114 +262,152 @@ export default function App() {
   );
 }
 
-// ── Prompt result card ─────────────────────────────────────────────────────────
-function PromptCard({ result }) {
-  const {
-    optimizedPrompt, systemPrompt, taskType, classification,
-    savings, hallucinationRisk, promptTokenCount,
-    maxOutputTokensSuggested, cacheHit, interviewerTokensUsed,
-  } = result;
-
-  const meta  = TASK_META[taskType] ?? { label: taskType, color: "#475569" };
-  const [tab, setTab]     = useState("prompt");
-  const [copied, setCopied] = useState(false);
-
-  const copy = () => {
-    const full = systemPrompt
-      ? `SYSTEM:\n${systemPrompt}\n\nUSER:\n${optimizedPrompt}`
-      : optimizedPrompt;
-    navigator.clipboard.writeText(full);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+// ── Step card — shown live as pipeline runs ────────────────────────────────────
+function StepCard({ step }) {
+  const icons = {
+    step:               "⚙",
+    status:             "⟳",
+    extraction_done:    "🔍",
+    llm_done:           "⚡",
+    interpretation_done:"✅",
   };
 
-  const riskColor =
-    hallucinationRisk?.level === "low"    ? "#059669" :
-    hallucinationRisk?.level === "medium" ? "#d97706" : "#dc2626";
+  const icon = icons[step.type] ?? "·";
 
   return (
-    <div style={P.card}>
-      {/* Top */}
-      <div style={P.top}>
-        <div style={P.chips}>
-          <span style={{ ...P.chip, background: meta.color + "18", color: meta.color }}>
-            {meta.label}
-          </span>
-          {hallucinationRisk && (
-            <span style={{ ...P.chip, background: riskColor + "12", color: riskColor }}>
-              {hallucinationRisk.level} hallucination risk
-            </span>
-          )}
-          {cacheHit && (
-            <span style={{ ...P.chip, background: "#d1fae5", color: "#065f46" }}>
-              ⚡ cached
-            </span>
-          )}
-        </div>
-        <button
-          style={{ ...P.copyBtn, background: copied ? "#059669" : "#111827" }}
-          onClick={copy}
-        >
-          {copied ? "Copied!" : "Copy prompt"}
-        </button>
-      </div>
-
-      {/* Tabs */}
-      <div style={P.tabs}>
-        {[
-          { id: "prompt",  label: "Optimized prompt" },
-          { id: "system",  label: "System prompt" },
-          { id: "savings", label: "Token savings" },
-        ].map(t => (
-          <button
-            key={t.id}
-            style={{ ...P.tab, ...(tab === t.id ? P.tabActive : {}) }}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      {tab === "prompt" && <pre style={P.pre}>{optimizedPrompt}</pre>}
-      {tab === "system" && <pre style={P.pre}>{systemPrompt ?? "No system prompt for this task type."}</pre>}
-      {tab === "savings" && (
-        <div style={P.savings}>
-          <SavingsRow label="Naive tokens (estimated)"  value={savings?.naiveTokens} />
-          <SavingsRow label="Optimized prompt tokens"   value={savings?.optimizedTokens} accent />
-          <SavingsRow label="Tokens saved"              value={savings?.tokensSaved} accent />
-          <SavingsRow label="Reduction"                 value={`${savings?.savingsPercent ?? 0}%`} accent />
-          <SavingsRow label="Suggested max_tokens"      value={maxOutputTokensSuggested} />
-          <SavingsRow label="Interviewer tokens used"   value={interviewerTokensUsed} />
-          <SavingsRow label="Total prompt tokens"       value={promptTokenCount} />
-          <SavingsRow label="Confidence"                value={classification?.confidence} />
-        </div>
-      )}
-
-      {/* Paste hint */}
-      <div style={P.hint}>
-        Paste into Claude.ai, ChatGPT, Cursor, or any LLM.
-        {maxOutputTokensSuggested && (
-          <> Set <code style={P.code}>max_tokens = {maxOutputTokensSuggested}</code> for best results.</>
+    <div style={ST.card}>
+      <span style={ST.icon}>{icon}</span>
+      <div style={ST.content}>
+        <p style={ST.msg}>{step.message}</p>
+        {step.data && step.type === "extraction_done" && (
+          <div style={ST.tags}>
+            <Tag label="Root cause" value={step.data.rootCause} />
+            <Tag label="Area"       value={step.data.problemArea} />
+            <Tag label="Severity"   value={step.data.severity} color={step.data.severity === "high" ? "#dc2626" : step.data.severity === "medium" ? "#d97706" : "#059669"} />
+          </div>
+        )}
+        {step.data && step.type === "llm_done" && (
+          <div style={ST.tags}>
+            <Tag label="Model"          value={step.data.model} />
+            <Tag label="Input tokens"   value={step.data.inputTokens} />
+            <Tag label="Output tokens"  value={step.data.outputTokens} />
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-function SavingsRow({ label, value, accent }) {
+function Tag({ label, value, color }) {
   return (
-    <div style={P.row}>
-      <span style={P.rowLabel}>{label}</span>
-      <span style={{ ...P.rowVal, color: accent ? "#111827" : "#9ca3af", fontWeight: accent ? 600 : 400 }}>
-        {value ?? "—"}
-      </span>
+    <span style={{ ...ST.tag, color: color ?? "#6b7280" }}>
+      <span style={ST.tagLabel}>{label}:</span> {value}
+    </span>
+  );
+}
+
+// ── Final result card ──────────────────────────────────────────────────────────
+function ResultCard({ result }) {
+  const { interpretation, rootCause, severity, tokensSaved, surgicalPrompt, rawLLMResponse } = result;
+  const [tab, setTab] = useState("action");
+  const [copied, setCopied] = useState(false);
+
+  const copy = (text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const severityColor = severity === "high" ? "#dc2626" : severity === "medium" ? "#d97706" : "#059669";
+
+  return (
+    <div style={R.card}>
+      {/* Header */}
+      <div style={R.header}>
+        <div style={R.headerLeft}>
+          <span style={{ ...R.chip, background: severityColor + "15", color: severityColor }}>
+            {severity} severity
+          </span>
+          {tokensSaved > 0 && (
+            <span style={{ ...R.chip, background: "#d1fae5", color: "#065f46" }}>
+              ~{tokensSaved} tokens saved
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Root cause */}
+      <div style={R.rootCause}>
+        <span style={R.rootLabel}>ROOT CAUSE</span>
+        <p style={R.rootText}>{rootCause}</p>
+      </div>
+
+      {/* Tabs */}
+      <div style={R.tabs}>
+        {[
+          { id: "action",   label: "Action plan" },
+          { id: "prompt",   label: "Surgical prompt" },
+          { id: "response", label: "LLM response" },
+        ].map(t => (
+          <button key={t.id}
+            style={{ ...R.tab, ...(tab === t.id ? R.tabActive : {}) }}
+            onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Action plan */}
+      {tab === "action" && interpretation && (
+        <div style={R.actionPlan}>
+          <ActionRow icon="✅" label="The fix"           value={interpretation.fix} />
+          <ActionRow icon="💡" label="Why it works"      value={interpretation.why_it_works} />
+          {interpretation.steps?.length > 0 && (
+            <div style={R.actionBlock}>
+              <span style={R.actionLabel}>Steps</span>
+              <ol style={R.stepList}>
+                {interpretation.steps.map((s, i) => <li key={i} style={R.stepItem}>{s}</li>)}
+              </ol>
+            </div>
+          )}
+          <ActionRow icon="🧪" label="Test by"           value={interpretation.what_to_test} />
+          <ActionRow icon="⚠" label="Watch out for"     value={interpretation.what_could_go_wrong} />
+          <div style={R.nextAction}>
+            <span style={R.nextLabel}>➡ Next action</span>
+            <p style={R.nextText}>{interpretation.next_action}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Surgical prompt */}
+      {tab === "prompt" && (
+        <div style={R.preWrap}>
+          <button style={R.copyBtn} onClick={() => copy(surgicalPrompt)}>
+            {copied ? "Copied!" : "Copy"}
+          </button>
+          <pre style={R.pre}>{surgicalPrompt}</pre>
+        </div>
+      )}
+
+      {/* Raw LLM response */}
+      {tab === "response" && (
+        <pre style={R.pre}>{rawLLMResponse}</pre>
+      )}
     </div>
   );
 }
 
-// ── Bubble ─────────────────────────────────────────────────────────────────────
+function ActionRow({ icon, label, value }) {
+  if (!value) return null;
+  return (
+    <div style={R.actionBlock}>
+      <span style={R.actionLabel}>{icon} {label}</span>
+      <p style={R.actionValue}>{value}</p>
+    </div>
+  );
+}
+
+// ── Chat bubble ────────────────────────────────────────────────────────────────
 function Bubble({ msg }) {
   if (msg.role === "user") return (
     <div style={B.userRow}><div style={B.user}>{msg.text}</div></div>
@@ -366,8 +417,22 @@ function Bubble({ msg }) {
   );
   return (
     <div style={B.botRow}>
-      <div style={B.avatar}>AI</div>
-      <div style={B.bot}><p style={B.botText}>{msg.text}</p></div>
+      <div style={B.avatar}>PP</div>
+      <div style={B.bot}><p style={B.text}>{msg.text}</p></div>
+    </div>
+  );
+}
+
+function ThinkingDots({ label = "Thinking..." }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0" }}>
+      <div style={{ display:"flex", gap:4 }}>
+        {[0,150,300].map(d => (
+          <span key={d} style={{ width:5, height:5, borderRadius:"50%", background:"#9ca3af",
+            display:"inline-block", animation:`blink 1.2s ${d}ms infinite` }} />
+        ))}
+      </div>
+      <span style={{ fontSize:12, color:"#9ca3af" }}>{label}</span>
     </div>
   );
 }
@@ -379,80 +444,88 @@ const Arrow = () => (
   </svg>
 );
 
-const Dots = () => (
-  <div style={{ display: "flex", gap: 4 }}>
-    {[0, 150, 300].map(d => (
-      <span key={d} style={{
-        width: 5, height: 5, borderRadius: "50%", background: "#9ca3af",
-        display: "inline-block", animation: `blink 1.2s ${d}ms infinite`,
-      }} />
-    ))}
-  </div>
-);
-
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const FONT = "'Inter', system-ui, sans-serif";
-const MONO = "'IBM Plex Mono', 'Fira Code', monospace";
+const MONO = "'IBM Plex Mono', monospace";
 
 const S = {
-  shell:     { display:"flex", flexDirection:"column", height:"100vh", background:"#f9fafb", fontFamily:FONT, color:"#111827" },
-  header:    { display:"flex", alignItems:"center", gap:12, padding:"0 28px", height:52, borderBottom:"1px solid #e5e7eb", background:"#fff", flexShrink:0 },
-  brand:     { display:"flex", alignItems:"center", gap:8 },
-  brandMark: { width:26, height:26, background:"#111827", color:"#fff", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:700, letterSpacing:0.5, flexShrink:0 },
-  brandName: { fontSize:14, fontWeight:600 },
-  tagline:   { fontSize:11, color:"#9ca3af", flex:1 },
-  newBtn:    { fontSize:12, color:"#111827", background:"transparent", border:"1px solid #e5e7eb", borderRadius:6, padding:"5px 12px", cursor:"pointer" },
-  main:      { flex:1, overflowY:"auto", padding:"0 28px" },
-  col:       { maxWidth:660, margin:"0 auto", paddingTop:40, paddingBottom:24 },
-  empty:     { textAlign:"center", paddingTop:60 },
-  emptyH:    { fontSize:20, fontWeight:600, letterSpacing:-0.5, marginBottom:10 },
-  emptyB:    { fontSize:14, color:"#6b7280", lineHeight:1.7, maxWidth:420, margin:"0 auto 24px" },
-  pills:     { display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center" },
-  pill:      { fontSize:11, color:"#6b7280", border:"1px solid #e5e7eb", borderRadius:20, padding:"3px 12px" },
-  thinkRow:  { display:"flex", alignItems:"center", gap:8, padding:"8px 0" },
-  thinkLabel:{ fontSize:12, color:"#9ca3af" },
-  footer:    { borderTop:"1px solid #e5e7eb", background:"#fff", padding:"12px 28px", flexShrink:0 },
-  readyBox:  { maxWidth:660, margin:"0 auto" },
-  readyLabel:{ fontSize:13, color:"#6b7280", marginBottom:10 },
-  readyRow:  { display:"flex", gap:10 },
-  buildBtn:  { flex:1, background:"#111827", color:"#fff", border:"none", borderRadius:8, padding:"12px", fontSize:13, fontWeight:500, cursor:"pointer" },
-  moreBtn:   { background:"transparent", color:"#6b7280", border:"1px solid #e5e7eb", borderRadius:8, padding:"12px 16px", fontSize:13, cursor:"pointer" },
-  inputRow:  { maxWidth:660, margin:"0 auto", display:"flex", gap:8, alignItems:"flex-end" },
-  textarea:  { flex:1, resize:"none", border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:"#111827", background:"#fff", outline:"none", lineHeight:1.5 },
-  sendBtn:   { width:38, height:38, background:"#111827", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
-  hintRow:   { maxWidth:660, margin:"6px auto 0", display:"flex", justifyContent:"space-between", alignItems:"center" },
-  hint:      { fontSize:11, color:"#d1d5db" },
-  skipBtn:   { fontSize:11, color:"#6b7280", background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
-  forceBtn:  { fontSize:11, color:"#d97706", background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
+  shell:           { display:"flex", flexDirection:"column", height:"100vh", background:"#f9fafb", fontFamily:FONT, color:"#111827" },
+  header:          { display:"flex", alignItems:"center", gap:12, padding:"0 28px", height:52, borderBottom:"1px solid #e5e7eb", background:"#fff", flexShrink:0 },
+  brand:           { display:"flex", alignItems:"center", gap:8 },
+  mark:            { width:26, height:26, background:"#111827", color:"#fff", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, letterSpacing:0.5, flexShrink:0 },
+  name:            { fontSize:14, fontWeight:600 },
+  tagline:         { fontSize:11, color:"#9ca3af", flex:1 },
+  newBtn:          { fontSize:12, color:"#111827", background:"transparent", border:"1px solid #e5e7eb", borderRadius:6, padding:"5px 12px", cursor:"pointer" },
+  main:            { flex:1, overflowY:"auto", padding:"0 28px" },
+  col:             { maxWidth:660, margin:"0 auto", paddingTop:40, paddingBottom:24 },
+  empty:           { textAlign:"center", paddingTop:60 },
+  emptyH:          { fontSize:20, fontWeight:600, letterSpacing:-0.5, marginBottom:10 },
+  emptyB:          { fontSize:14, color:"#6b7280", lineHeight:1.7, maxWidth:420, margin:"0 auto 24px" },
+  pills:           { display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center" },
+  pill:            { fontSize:11, color:"#6b7280", border:"1px solid #e5e7eb", borderRadius:20, padding:"3px 12px" },
+  footer:          { borderTop:"1px solid #e5e7eb", background:"#fff", padding:"14px 28px", flexShrink:0 },
+  keyBox:          { maxWidth:660, margin:"0 auto" },
+  keyTitle:        { fontSize:13, fontWeight:500, color:"#111827", marginBottom:4 },
+  keySub:          { fontSize:11, color:"#9ca3af", marginBottom:12 },
+  keyRow:          { display:"flex", gap:8, alignItems:"center" },
+  providerToggle:  { display:"flex", border:"1px solid #e5e7eb", borderRadius:6, overflow:"hidden" },
+  providerBtn:     { padding:"8px 12px", fontSize:12, background:"transparent", border:"none", cursor:"pointer", color:"#6b7280" },
+  providerBtnActive:{ background:"#111827", color:"#fff" },
+  keyInput:        { flex:1, padding:"8px 12px", fontSize:12, border:"1px solid #e5e7eb", borderRadius:6, outline:"none", fontFamily:MONO },
+  runBtn:          { background:"#111827", color:"#fff", border:"none", borderRadius:6, padding:"8px 20px", fontSize:13, fontWeight:500, cursor:"pointer" },
+  inputRow:        { maxWidth:660, margin:"0 auto", display:"flex", gap:8, alignItems:"flex-end" },
+  textarea:        { flex:1, resize:"none", border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:"#111827", background:"#fff", outline:"none", lineHeight:1.5 },
+  sendBtn:         { width:38, height:38, background:"#111827", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
+  hintRow:         { maxWidth:660, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
+  hint:            { fontSize:11, color:"#d1d5db" },
+  skipBtn:         { fontSize:11, color:"#6b7280", background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
 };
 
 const B = {
-  userRow: { display:"flex", justifyContent:"flex-end", marginBottom:16 },
+  userRow: { display:"flex", justifyContent:"flex-end", marginBottom:14 },
   user:    { background:"#111827", color:"#f9fafb", borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:14, lineHeight:1.6, maxWidth:480 },
-  botRow:  { display:"flex", gap:10, marginBottom:16, alignItems:"flex-start" },
-  avatar:  { width:26, height:26, background:"#f3f4f6", border:"1px solid #e5e7eb", borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:600, color:"#6b7280", marginTop:2 },
+  botRow:  { display:"flex", gap:10, marginBottom:14, alignItems:"flex-start" },
+  avatar:  { width:26, height:26, background:"#f3f4f6", border:"1px solid #e5e7eb", borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, color:"#6b7280", marginTop:2 },
   bot:     { background:"#fff", border:"1px solid #e5e7eb", borderRadius:"2px 12px 12px 12px", padding:"10px 14px", maxWidth:500 },
-  botText: { margin:0, fontSize:14, lineHeight:1.7, color:"#111827" },
-  sysRow:  { display:"flex", justifyContent:"center", marginBottom:12 },
+  text:    { margin:0, fontSize:14, lineHeight:1.7, color:"#111827" },
+  sysRow:  { display:"flex", justifyContent:"center", marginBottom:10 },
   sys:     { fontSize:11, color:"#9ca3af", background:"#f9fafb", border:"1px solid #f3f4f6", borderRadius:20, padding:"3px 12px" },
 };
 
-const P = {
-  card:    { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:16 },
-  top:     { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:"1px solid #f3f4f6" },
-  chips:   { display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" },
-  chip:    { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
-  copyBtn: { fontSize:12, fontWeight:500, color:"#fff", border:"none", borderRadius:7, padding:"6px 14px", cursor:"pointer", transition:"background 0.2s", whiteSpace:"nowrap" },
-  tabs:    { display:"flex", borderBottom:"1px solid #f3f4f6" },
-  tab:     { fontSize:12, color:"#9ca3af", background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
-  tabActive:{ color:"#111827", borderBottom:"2px solid #111827" },
-  pre:     { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:"#374151", lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:"#f9fafb" },
-  savings: { padding:"12px 16px", display:"flex", flexDirection:"column", gap:6 },
-  row:     { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", borderBottom:"1px solid #f9fafb" },
-  rowLabel:{ fontSize:12, color:"#9ca3af" },
-  rowVal:  { fontSize:12, fontFamily:MONO },
-  hint:    { padding:"12px 16px", fontSize:11, color:"#9ca3af", borderTop:"1px solid #f3f4f6", lineHeight:1.6 },
-  code:    { fontFamily:MONO, fontSize:10, background:"#f3f4f6", padding:"1px 4px", borderRadius:3 },
+const ST = {
+  feed:     { display:"flex", flexDirection:"column", gap:8, marginBottom:16 },
+  card:     { display:"flex", gap:10, padding:"10px 14px", background:"#fff", border:"1px solid #e5e7eb", borderRadius:8, animation:"fadeUp 0.2s ease" },
+  icon:     { fontSize:14, flexShrink:0, marginTop:1 },
+  content:  { flex:1 },
+  msg:      { fontSize:13, color:"#374151", marginBottom:4 },
+  tags:     { display:"flex", gap:12, flexWrap:"wrap" },
+  tag:      { fontSize:11 },
+  tagLabel: { color:"#9ca3af" },
+};
+
+const R = {
+  card:        { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
+  header:      { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:"1px solid #f3f4f6" },
+  headerLeft:  { display:"flex", gap:8 },
+  chip:        { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
+  rootCause:   { padding:"14px 16px", borderBottom:"1px solid #f3f4f6", background:"#fafafa" },
+  rootLabel:   { fontSize:9, fontWeight:700, color:"#9ca3af", letterSpacing:1, display:"block", marginBottom:4 },
+  rootText:    { fontSize:14, color:"#111827", lineHeight:1.6 },
+  tabs:        { display:"flex", borderBottom:"1px solid #f3f4f6" },
+  tab:         { fontSize:12, color:"#9ca3af", background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
+  tabActive:   { color:"#111827", borderBottom:"2px solid #111827" },
+  actionPlan:  { padding:"14px 16px", display:"flex", flexDirection:"column", gap:12 },
+  actionBlock: { display:"flex", flexDirection:"column", gap:4 },
+  actionLabel: { fontSize:11, fontWeight:600, color:"#6b7280" },
+  actionValue: { fontSize:13, color:"#111827", lineHeight:1.6 },
+  stepList:    { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
+  stepItem:    { fontSize:13, color:"#111827", lineHeight:1.6 },
+  nextAction:  { background:"#111827", borderRadius:8, padding:"12px 14px" },
+  nextLabel:   { fontSize:11, fontWeight:600, color:"#9ca3af", display:"block", marginBottom:4 },
+  nextText:    { fontSize:13, color:"#fff", lineHeight:1.6 },
+  preWrap:     { position:"relative" },
+  copyBtn:     { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
+  pre:         { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:"#374151", lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:"#f9fafb" },
 };
 
 const CSS = `
@@ -460,6 +533,10 @@ const CSS = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #f9fafb; }
   textarea:focus { border-color: #111827 !important; outline: none; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
   @keyframes blink {
     0%, 80%, 100% { opacity: 0.15; transform: scale(0.8); }
     40%           { opacity: 1;    transform: scale(1); }
