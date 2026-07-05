@@ -3,61 +3,41 @@ const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 export const MAX_TURNS = 4;
 
-/**
- * CORE PHILOSOPHY:
- * The middleware acts like a senior engineer briefing an expert consultant.
- * Before the expensive LLM sees anything, we extract:
- *   - What exactly is the problem / goal
- *   - What the user has already (code, error, context)
- *   - What was already tried
- *   - What "done" looks like
- *
- * This means the big LLM gets ONE perfect request instead of
- * 10 vague back-and-forth messages — saving hours of debugging time
- * and 60-80% of tokens.
- */
-
 const INTERVIEWER_SYSTEM_PROMPT = `
-You are a context extraction expert. Your job is to get everything needed 
-to solve any problem in ONE shot — no back and forth, no guessing.
+You are a context extraction expert. Extract everything needed to solve the user's problem in one shot.
 
-The #1 cause of wrong answers and wasted tokens:
-Getting a description of the problem instead of the actual problem.
+CRITICAL RULE: When the user pastes a large block of text (resume, code, job description, error, data) — 
+store it VERBATIM in existing_context. Never summarize it. Never paraphrase it. The full text must be preserved.
 
-For ANY task, figure out what the "actual thing" is and ask for it:
-- Bug or error → paste the exact error + the code
-- Something not working → what it does vs what it should do
-- Write something → who it's for, what it should achieve, any examples to match
-- Analyze something → paste the actual data, text, or content
-- Build something → what already exists, exact requirements
-- Explain something → what they already know, what's confusing them
-- Fix or improve something → paste the current version
+For any task, figure out:
+- What exactly needs to be done
+- What the user already has (paste it verbatim into existing_context)
+- What they've already tried
+- What success looks like
 
 Rules:
 1. Never attempt the task yourself.
-2. Ask ONE question at a time — the single most critical missing piece.
-3. Always ask for things to be PASTED, not described.
-4. Stop when you have enough to solve it without guessing anything.
-5. If the user pastes rich context upfront — output JSON immediately, no questions.
-6. Never ask about things that don't change the answer.
-7. Never include null fields in the JSON — only include what you actually have.
+2. Ask ONE question at a time — the most critical missing piece.
+3. If the user pastes rich content upfront — output JSON immediately, no questions needed.
+4. Never summarize pasted content — store it word for word.
+5. Stop asking when you have enough to solve without guessing.
 
 When ready, output ONLY this JSON:
 {
   "ready": true,
   "structured_context": {
     "goal": "exact task — specific and verb-led",
-    "existing_context": "actual pasted content — code, text, data, error, draft",
-    "already_tried": "what already failed — only if mentioned",
+    "existing_context": "FULL verbatim pasted content — resume, code, JD, error — word for word",
+    "already_tried": "what already failed — null if not mentioned",
     "expected_output": "what success looks like",
-    "constraints": "limits, versions, platform, length — only if relevant",
+    "constraints": "limits, versions, platform — null if none",
     "domain": "subject area or technology",
     "raw_intent": "user's original message verbatim",
     "complexity": "simple|medium|complex"
   }
 }
 
-Omit any field with no real content. Output ONLY the JSON when ready.
+Omit fields with no real content. Output ONLY the JSON when ready.
 `.trim();
 
 export const runInterviewTurn = async (userMessage, history = []) => {
@@ -69,12 +49,11 @@ export const runInterviewTurn = async (userMessage, history = []) => {
       { role: "system", content: INTERVIEWER_SYSTEM_PROMPT },
       ...updatedHistory,
     ],
-    max_tokens: 300,
+    max_tokens: 600,
   });
 
   const reply = response.choices[0].message.content.trim();
 
-  // Extract JSON even if Llama leaks surrounding text
   const jsonMatch = reply.match(/\{[\s\S]*"ready"[\s\S]*\}/);
   if (jsonMatch) {
     try {
@@ -101,6 +80,13 @@ export const runInterviewTurn = async (userMessage, history = []) => {
 };
 
 export const forceExtractContext = async (history) => {
+  // Build context directly from conversation history
+  // Grab all user messages and concatenate — preserves full pasted content
+  const userMessages = history
+    .filter(m => m.role === "user")
+    .map(m => m.content)
+    .join("\n\n");
+
   const response = await client.chat.completions.create({
     model:    "llama-3.3-70b-versatile",
     messages: [
@@ -108,10 +94,10 @@ export const forceExtractContext = async (history) => {
       ...history,
       {
         role:    "user",
-        content: "That's all the context I have. Build the best brief you can from what I've told you. Set unknown fields to null.",
+        content: "That's all the context I have. Build the structured_context JSON now. Store all pasted content verbatim in existing_context. Set unknown fields to null.",
       },
     ],
-    max_tokens: 500,
+    max_tokens: 2000,
   });
 
   const reply = response.choices[0].message.content.trim();
@@ -124,15 +110,16 @@ export const forceExtractContext = async (history) => {
     } catch (_) {}
   }
 
-  const lastUser = [...history].reverse().find((m) => m.role === "user");
+  // Fallback: build context directly from what user said
+  const lastUser = [...history].reverse().find(m => m.role === "user");
   return {
     goal:             lastUser?.content ?? "complete the task",
-    existing_context: null,
+    existing_context: userMessages,
     already_tried:    null,
     expected_output:  null,
     constraints:      null,
     domain:           null,
-    raw_intent:       lastUser?.content ?? "",
+    raw_intent:       history[0]?.content ?? "",
     complexity:       "medium",
   };
 };

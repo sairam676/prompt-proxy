@@ -308,21 +308,28 @@ function Tag({ label, value, color }) {
 
 // ── Final result card ──────────────────────────────────────────────────────────
 function ResultCard({ result }) {
-  const { interpretation, rootCause, severity, tokensSaved, surgicalPrompt, rawLLMResponse } = result;
-  const [tab, setTab] = useState("action");
+  const {
+    interpretation, rootCause, keyInsight, severity,
+    tokensSaved, surgicalPrompt, rawLLMResponse,
+    whatToVerify, potentialRisks,
+  } = result;
+
+  const [tab, setTab]       = useState("action");
   const [copied, setCopied] = useState(false);
 
   const copy = (text) => {
-    navigator.clipboard.writeText(text);
+    const str = typeof text === "object" ? JSON.stringify(text, null, 2) : text;
+    navigator.clipboard.writeText(str);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const severityColor = severity === "high" ? "#dc2626" : severity === "medium" ? "#d97706" : "#059669";
+  const severityColor =
+    severity === "high"   ? "#dc2626" :
+    severity === "medium" ? "#d97706" : "#059669";
 
   return (
     <div style={R.card}>
-      {/* Header */}
       <div style={R.header}>
         <div style={R.headerLeft}>
           <span style={{ ...R.chip, background: severityColor + "15", color: severityColor }}>
@@ -336,60 +343,82 @@ function ResultCard({ result }) {
         </div>
       </div>
 
-      {/* Root cause */}
       <div style={R.rootCause}>
         <span style={R.rootLabel}>ROOT CAUSE</span>
         <p style={R.rootText}>{rootCause}</p>
+        {keyInsight && <p style={R.insight}>💡 {keyInsight}</p>}
       </div>
 
-      {/* Tabs */}
+      {interpretation?.primary_action && (
+        <div style={R.primaryAction}>
+          <span style={R.primaryLabel}>➡ DO THIS NOW</span>
+          <p style={R.primaryText}>{interpretation.primary_action}</p>
+        </div>
+      )}
+
+      {interpretation?.summary && (
+        <div style={R.summary}>
+          <p style={R.summaryText}>{interpretation.summary}</p>
+        </div>
+      )}
+
       <div style={R.tabs}>
         {[
-          { id: "action",   label: "Action plan" },
+          { id: "action",   label: "Full action plan" },
           { id: "prompt",   label: "Surgical prompt" },
           { id: "response", label: "LLM response" },
         ].map(t => (
           <button key={t.id}
             style={{ ...R.tab, ...(tab === t.id ? R.tabActive : {}) }}
-            onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
+            onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
 
-      {/* Action plan */}
       {tab === "action" && interpretation && (
         <div style={R.actionPlan}>
-          <ActionRow icon="✅" label="The fix"           value={interpretation.fix} />
-          <ActionRow icon="💡" label="Why it works"      value={interpretation.why_it_works} />
-          {interpretation.steps?.length > 0 && (
+          {interpretation.output_sections?.map((section, i) => (
+            <DynamicSection key={i} section={section} />
+          ))}
+          {(whatToVerify ?? interpretation.what_to_verify) && (
             <div style={R.actionBlock}>
-              <span style={R.actionLabel}>Steps</span>
-              <ol style={R.stepList}>
-                {interpretation.steps.map((s, i) => <li key={i} style={R.stepItem}>{s}</li>)}
-              </ol>
+              <span style={R.actionLabel}>🧪 Verify it worked</span>
+              <p style={R.actionValue}>{whatToVerify ?? interpretation.what_to_verify}</p>
             </div>
           )}
-          <ActionRow icon="🧪" label="Test by"           value={interpretation.what_to_test} />
-          <ActionRow icon="⚠" label="Watch out for"     value={interpretation.what_could_go_wrong} />
-          <div style={R.nextAction}>
-            <span style={R.nextLabel}>➡ Next action</span>
-            <p style={R.nextText}>{interpretation.next_action}</p>
-          </div>
+          {(potentialRisks ?? interpretation.what_could_go_wrong) && (
+            <div style={{ ...R.actionBlock, background:"#fff7ed", borderRadius:8, padding:"10px 12px" }}>
+              <span style={{ ...R.actionLabel, color:"#d97706" }}>⚠ Watch out for</span>
+              <p style={R.actionValue}>{potentialRisks ?? interpretation.what_could_go_wrong}</p>
+            </div>
+          )}
+          {interpretation.follow_up && (
+            <div style={R.actionBlock}>
+              <span style={R.actionLabel}>📌 After this</span>
+              <p style={R.actionValue}>{interpretation.follow_up}</p>
+            </div>
+          )}
+          {interpretation.llm_missed && (
+            <div style={{ ...R.actionBlock, background:"#fef2f2", borderRadius:8, padding:"10px 12px" }}>
+              <span style={{ ...R.actionLabel, color:"#dc2626" }}>⚡ LLM didn't cover</span>
+              <p style={R.actionValue}>{interpretation.llm_missed}</p>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Surgical prompt */}
       {tab === "prompt" && (
         <div style={R.preWrap}>
           <button style={R.copyBtn} onClick={() => copy(surgicalPrompt)}>
             {copied ? "Copied!" : "Copy"}
           </button>
-          <pre style={R.pre}>{surgicalPrompt}</pre>
+          <pre style={R.pre}>
+            {typeof surgicalPrompt === "object"
+              ? JSON.stringify(surgicalPrompt, null, 2)
+              : surgicalPrompt}
+          </pre>
         </div>
       )}
 
-      {/* Raw LLM response */}
       {tab === "response" && (
         <pre style={R.pre}>{rawLLMResponse}</pre>
       )}
@@ -397,12 +426,25 @@ function ResultCard({ result }) {
   );
 }
 
-function ActionRow({ icon, label, value }) {
-  if (!value) return null;
+function DynamicSection({ section }) {
+  if (!section?.content) return null;
+  const typeIcons = { code:"💻", list:"📋", steps:"📝", warning:"⚠", tip:"💡", text:"•" };
+  const icon = typeIcons[section.type] ?? "•";
   return (
     <div style={R.actionBlock}>
-      <span style={R.actionLabel}>{icon} {label}</span>
-      <p style={R.actionValue}>{value}</p>
+      <span style={R.actionLabel}>{icon} {section.title}</span>
+      {section.type === "code" ? (
+        <pre style={{ ...R.pre, marginTop:6, borderRadius:6 }}>{section.content}</pre>
+      ) : section.type === "list" || section.type === "steps" ? (
+        <ol style={R.stepList}>
+          {(Array.isArray(section.content)
+            ? section.content
+            : section.content.split("\n").filter(Boolean)
+          ).map((item, i) => <li key={i} style={R.stepItem}>{item}</li>)}
+        </ol>
+      ) : (
+        <p style={R.actionValue}>{section.content}</p>
+      )}
     </div>
   );
 }
@@ -504,28 +546,31 @@ const ST = {
 };
 
 const R = {
-  card:        { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
-  header:      { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:"1px solid #f3f4f6" },
-  headerLeft:  { display:"flex", gap:8 },
-  chip:        { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
-  rootCause:   { padding:"14px 16px", borderBottom:"1px solid #f3f4f6", background:"#fafafa" },
-  rootLabel:   { fontSize:9, fontWeight:700, color:"#9ca3af", letterSpacing:1, display:"block", marginBottom:4 },
-  rootText:    { fontSize:14, color:"#111827", lineHeight:1.6 },
-  tabs:        { display:"flex", borderBottom:"1px solid #f3f4f6" },
-  tab:         { fontSize:12, color:"#9ca3af", background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
-  tabActive:   { color:"#111827", borderBottom:"2px solid #111827" },
-  actionPlan:  { padding:"14px 16px", display:"flex", flexDirection:"column", gap:12 },
-  actionBlock: { display:"flex", flexDirection:"column", gap:4 },
-  actionLabel: { fontSize:11, fontWeight:600, color:"#6b7280" },
-  actionValue: { fontSize:13, color:"#111827", lineHeight:1.6 },
-  stepList:    { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
-  stepItem:    { fontSize:13, color:"#111827", lineHeight:1.6 },
-  nextAction:  { background:"#111827", borderRadius:8, padding:"12px 14px" },
-  nextLabel:   { fontSize:11, fontWeight:600, color:"#9ca3af", display:"block", marginBottom:4 },
-  nextText:    { fontSize:13, color:"#fff", lineHeight:1.6 },
-  preWrap:     { position:"relative" },
-  copyBtn:     { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
-  pre:         { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:"#374151", lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:"#f9fafb" },
+  card:          { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
+  header:        { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:"1px solid #f3f4f6" },
+  headerLeft:    { display:"flex", gap:8 },
+  chip:          { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
+  rootCause:     { padding:"14px 16px", borderBottom:"1px solid #f3f4f6", background:"#fafafa" },
+  rootLabel:     { fontSize:9, fontWeight:700, color:"#9ca3af", letterSpacing:1, display:"block", marginBottom:4 },
+  rootText:      { fontSize:14, color:"#111827", lineHeight:1.6 },
+  insight:       { fontSize:13, color:"#6366f1", lineHeight:1.6, marginTop:6, fontStyle:"italic" },
+  primaryAction: { padding:"12px 16px", background:"#111827", borderBottom:"1px solid #1f2937" },
+  primaryLabel:  { fontSize:9, fontWeight:700, color:"#6b7280", letterSpacing:1, display:"block", marginBottom:4 },
+  primaryText:   { fontSize:14, color:"#fff", lineHeight:1.6, fontWeight:500 },
+  summary:       { padding:"10px 16px", borderBottom:"1px solid #f3f4f6" },
+  summaryText:   { fontSize:13, color:"#6b7280", lineHeight:1.6, fontStyle:"italic" },
+  tabs:          { display:"flex", borderBottom:"1px solid #f3f4f6" },
+  tab:           { fontSize:12, color:"#9ca3af", background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
+  tabActive:     { color:"#111827", borderBottom:"2px solid #111827" },
+  actionPlan:    { padding:"14px 16px", display:"flex", flexDirection:"column", gap:12 },
+  actionBlock:   { display:"flex", flexDirection:"column", gap:4 },
+  actionLabel:   { fontSize:11, fontWeight:600, color:"#6b7280" },
+  actionValue:   { fontSize:13, color:"#111827", lineHeight:1.6, whiteSpace:"pre-wrap" },
+  stepList:      { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
+  stepItem:      { fontSize:13, color:"#111827", lineHeight:1.6 },
+  preWrap:       { position:"relative" },
+  copyBtn:       { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
+  pre:           { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:"#374151", lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:"#f9fafb" },
 };
 
 const CSS = `

@@ -1,66 +1,56 @@
-/**
- * extractor.js
- * 
- * Step 1 of the pipeline — our cheap Groq model extracts:
- * - What the actual problem is
- * - Root cause (if identifiable from context)
- * - What's missing that would prevent solving it
- * - Severity / complexity
- * 
- * This runs BEFORE the user's expensive LLM sees anything.
- * We never waste their credits on a vague prompt.
- */
-
 import Groq from "groq-sdk";
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const EXTRACTOR_PROMPT = `
-You are a problem analysis expert. Given a user's problem, extract a structured analysis.
+You are a deep problem analyst. Given the user's full context, produce a complete analysis.
 
-Output ONLY this JSON — no text before or after:
+CRITICAL: The user has already provided their context. Do NOT say anything is missing.
+Work with what you have. If the context is rich — use it fully.
+
+Think:
+1. What is the actual root cause or core challenge?
+2. What does the user specifically need based on their context?
+3. What surgical prompt will get the best response from an expert LLM?
+
+The surgical_prompt must include ALL the user's actual content — their resume, code, JD, error — everything.
+The expert LLM only sees this prompt. Make it complete.
+
+Output ONLY this JSON:
 {
-  "root_cause": "the most likely root cause based on what's provided — be specific",
-  "problem_area": "what system/component/concept is affected",
+  "root_cause": "the actual root cause or core challenge — specific",
+  "problem_area": "exactly what area is affected",
   "severity": "low|medium|high",
   "complexity": "simple|medium|complex",
-  "missing_critical": "what critical info is missing that would prevent solving this — null if nothing critical is missing",
-  "surgical_prompt": "a tight, complete prompt for the user's LLM that will solve this in one shot — include all relevant context they provided",
-  "what_to_verify": "what the user should check/test after applying the solution",
-  "potential_risks": "what could go wrong with the solution"
+  "key_insight": "something important the user may not have realized",
+  "surgical_prompt": "complete prompt for the expert LLM — include ALL user context verbatim",
+  "what_to_verify": "how to confirm the solution worked",
+  "potential_risks": "what could still go wrong"
 }
-
-Be specific. Use the actual content the user provided. Never be vague.
-Never say 'the issue' — name the specific thing.
 `.trim();
 
 export const extractAndAnalyze = async (userContext, onStep) => {
   onStep({ type: "status", message: "Analyzing your problem..." });
 
   const response = await groq.chat.completions.create({
-    model:      "llama-3.3-70b-versatile",
-    max_tokens: 800,
+    model:    "llama-3.3-70b-versatile",
     messages: [
       { role: "system", content: EXTRACTOR_PROMPT },
       { role: "user",   content: formatContext(userContext) },
     ],
+    response_format: { type: "json_object" },
   });
 
-  const raw = response.choices[0].message.content.trim();
-
-  // Extract JSON even if model leaks surrounding text
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("Extractor failed to return valid JSON");
-
-  const analysis = JSON.parse(jsonMatch[0]);
+  const analysis = JSON.parse(response.choices[0].message.content.trim());
 
   onStep({
     type:    "extraction_done",
     message: "Problem analyzed",
-    data:    {
+    data: {
       rootCause:   analysis.root_cause,
       problemArea: analysis.problem_area,
       severity:    analysis.severity,
       complexity:  analysis.complexity,
+      keyInsight:  analysis.key_insight,
     },
   });
 
@@ -69,10 +59,11 @@ export const extractAndAnalyze = async (userContext, onStep) => {
 
 const formatContext = (ctx) => {
   const parts = [];
-  if (ctx.goal)             parts.push(`Problem: ${ctx.goal}`);
-  if (ctx.existing_context) parts.push(`Context/Code/Error:\n${ctx.existing_context}`);
+  if (ctx.goal)             parts.push(`Goal: ${ctx.goal}`);
+  if (ctx.existing_context) parts.push(`User's full context:\n${ctx.existing_context}`);
   if (ctx.already_tried)    parts.push(`Already tried: ${ctx.already_tried}`);
-  if (ctx.expected_output)  parts.push(`Expected: ${ctx.expected_output}`);
+  if (ctx.expected_output)  parts.push(`Expected outcome: ${ctx.expected_output}`);
   if (ctx.constraints)      parts.push(`Constraints: ${ctx.constraints}`);
+  if (ctx.domain)           parts.push(`Domain: ${ctx.domain}`);
   return parts.join("\n\n");
 };

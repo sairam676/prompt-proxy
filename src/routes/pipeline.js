@@ -125,7 +125,7 @@ router.get("/run/:sessionId", async (req, res) => {
       send({ type: "error", message: "Interview not complete" });
       return res.end();
     }
-
+console.log("CTX:", JSON.stringify(session.structuredContext, null, 2));
     await runPipeline(session.structuredContext, provider, apiKey, send);
   } catch (err) {
     console.error("[/pipeline/run]", err);
