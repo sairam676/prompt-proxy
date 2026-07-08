@@ -4,40 +4,33 @@ const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 export const MAX_TURNS = 4;
 
 const INTERVIEWER_SYSTEM_PROMPT = `
-You are a context extraction expert. Extract everything needed to solve the user's problem in one shot.
+You are a context extraction expert. Your job is to get enough information to solve the problem.
 
-CRITICAL RULE: When the user pastes a large block of text (resume, code, job description, error, data) — 
-store it VERBATIM in existing_context. Never summarize it. Never paraphrase it. The full text must be preserved.
+RULES:
+1. Never show JSON, field names, or internal structure to the user. Ask naturally.
+2. Never ask for code you don't actually need. If you can identify the bug from what's given, stop asking.
+3. If the error + relevant code is already pasted, you have enough. Output JSON immediately.
+4. Store all pasted code and errors verbatim in existing_context.
+5. Ask ONE question only if something genuinely critical is missing.
+6. Never repeat the same question twice.
 
-For any task, figure out:
-- What exactly needs to be done
-- What the user already has (paste it verbatim into existing_context)
-- What they've already tried
-- What success looks like
-
-Rules:
-1. Never attempt the task yourself.
-2. Ask ONE question at a time — the most critical missing piece.
-3. If the user pastes rich content upfront — output JSON immediately, no questions needed.
-4. Never summarize pasted content — store it word for word.
-5. Stop asking when you have enough to solve without guessing.
+For a bug report with error + code already provided — that's enough. Don't ask for more.
+Identify what you can from what's given and output the JSON.
 
 When ready, output ONLY this JSON:
 {
   "ready": true,
   "structured_context": {
-    "goal": "exact task — specific and verb-led",
-    "existing_context": "FULL verbatim pasted content — resume, code, JD, error — word for word",
-    "already_tried": "what already failed — null if not mentioned",
-    "expected_output": "what success looks like",
-    "constraints": "limits, versions, platform — null if none",
-    "domain": "subject area or technology",
+    "goal": "fix the bug",
+    "existing_context": "full verbatim error + code exactly as pasted",
+    "already_tried": "2 hours of debugging",
+    "expected_output": "working code with the bug fixed",
+    "constraints": null,
+    "domain": "Node.js Express",
     "raw_intent": "user's original message verbatim",
-    "complexity": "simple|medium|complex"
+    "complexity": "medium"
   }
 }
-
-Omit fields with no real content. Output ONLY the JSON when ready.
 `.trim();
 
 export const runInterviewTurn = async (userMessage, history = []) => {
@@ -52,9 +45,12 @@ export const runInterviewTurn = async (userMessage, history = []) => {
     max_tokens: 600,
   });
 
-  const reply = response.choices[0].message.content.trim();
+  const raw     = response.choices[0].message.content.trim();
+  // Strip markdown fences Llama sometimes adds
+  const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 
-  const jsonMatch = reply.match(/\{[\s\S]*"ready"[\s\S]*\}/);
+  // Check if interviewer is done
+  const jsonMatch = cleaned.match(/\{[\s\S]*"ready"[\s\S]*\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
@@ -69,11 +65,12 @@ export const runInterviewTurn = async (userMessage, history = []) => {
     } catch (_) {}
   }
 
-  const cleanReply = reply.replace(/\{[\s\S]*\}/, "").trim();
-  const nextHistory = [...updatedHistory, { role: "assistant", content: reply }];
+  // Still interviewing — strip any partial JSON from the question
+  const cleanReply  = cleaned.replace(/\{[\s\S]*\}/, "").trim();
+  const nextHistory = [...updatedHistory, { role: "assistant", content: cleaned }];
   return {
     done:     false,
-    question: cleanReply || reply,
+    question: cleanReply || cleaned,
     history:  nextHistory,
     usage:    response.usage,
   };

@@ -14,7 +14,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState(null);
   const [loading, setLoading]   = useState(false);
   const [apiKey, setApiKey]     = useState("");
-  const [provider, setProvider] = useState("claude");
+  const [provider, setProvider] = useState("groq");
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
@@ -197,18 +197,18 @@ export default function App() {
             <p style={S.keySub}>Your key is used for this session only. Never logged or stored on our servers.</p>
             <div style={S.keyRow}>
               <div style={S.providerToggle}>
-                {["claude","openai"].map(p => (
-                  <button key={p}
-                    style={{ ...S.providerBtn, ...(provider === p ? S.providerBtnActive : {}) }}
-                    onClick={() => setProvider(p)}>
-                    {p === "claude" ? "Claude" : "OpenAI"}
-                  </button>
-                ))}
+               {["claude","openai","groq"].map(p => (
+  <button key={p}
+    style={{ ...S.providerBtn, ...(provider === p ? S.providerBtnActive : {}) }}
+    onClick={() => setProvider(p)}>
+    {p === "claude" ? "Claude" : p === "openai" ? "OpenAI" : "Groq"}
+  </button>
+))}
               </div>
               <input
                 type="password"
                 style={S.keyInput}
-                placeholder={provider === "claude" ? "sk-ant-..." : "sk-..."}
+                placeholder={provider === "claude" ? "sk-ant-..." : provider === "groq" ? "gsk_..." : "sk-..."}
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && runPipeline()}
