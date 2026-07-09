@@ -63,19 +63,21 @@ router.post("/reply", async (req, res) => {
     // ── Tie-break answer: the interview already finished once, the
     // Sufficiency Gate blocked mid-pipeline and asked a targeted question.
     // Don't re-run the interviewer LLM (it already said "ready" and would
-    // get confused) — just append the answer to existing_context, same
-    // pattern as chat.js's /supplement endpoint, and let the pipeline
-    // re-run the Hypothesis Engine fresh on the next SSE call.
+    // get confused) — append the answer to existing_context for the final
+    // surgical prompt, and stash it as pendingTieBreakAnswer so the next
+    // SSE run re-scores ONLY the two hypotheses that were competing,
+    // instead of regenerating the whole hypothesis set from scratch.
     if (session.awaitingTieBreak) {
       const ctx = session.structuredContext ?? {};
       ctx.existing_context = ctx.existing_context
         ? `${ctx.existing_context}\n\n${message}` : message;
       ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
 
-      session.structuredContext = ctx;
-      session.status            = "complete";
-      session.awaitingTieBreak  = false;
-      session.tieBreakQuestion  = null;
+      session.structuredContext    = ctx;
+      session.status                = "complete";
+      session.awaitingTieBreak      = false;
+      session.tieBreakQuestion      = null;
+      session.pendingTieBreakAnswer = message;
       await saveSession(sessionId, session);
 
       return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
@@ -145,29 +147,44 @@ router.get("/run/:sessionId", async (req, res) => {
       return res.end();
     }
 
-    const result = await runPipeline(session.structuredContext, provider, apiKey, send);
+    // If the last turn was a tie-break answer, resume with a targeted
+    // re-score instead of regenerating the whole hypothesis set.
+    const resume = session.pendingTieBreakAnswer
+      ? {
+          analysis:     session.analysis,
+          competingIds: session.competingIds,
+          newAnswer:    session.pendingTieBreakAnswer,
+        }
+      : null;
+
+    const result = await runPipeline(session.structuredContext, provider, apiKey, send, resume);
+
+    // Clear the consumed answer regardless of outcome — it's either been
+    // folded into updated hypotheses (success) or a fresh tie-break question
+    // is being asked (blocked again), neither case should replay the old answer.
+    session.pendingTieBreakAnswer = null;
 
     // ── Sufficiency Gate blocked — hand the tie-break question back to the
     // frontend as a "needs_info" event (App.jsx already listens for this
-    // exact type and switches phase to "interviewing"). Persist the gate
-    // state on the session so /reply knows to treat the next message as
-    // a tie-break answer, not a fresh interview turn.
+    // exact type and switches phase to "interviewing"). Persist enough state
+    // on the session (analysis + competingIds) so the NEXT answer can be
+    // re-scored against just those two hypotheses again.
     if (result?.blocked && result.reason === "insufficient_evidence") {
       session.status           = "interviewing";
       session.awaitingTieBreak = true;
       session.tieBreakQuestion = result.tieBreakQuestion;
-      session.hypotheses       = result.hypotheses;
+      session.analysis         = result.analysis;
+      session.competingIds     = result.competingIds;
       await saveSession(sessionId, session);
 
       send({ type: "needs_info", message: result.tieBreakQuestion });
       return res.end();
     }
 
-    // Successful run — persist final hypotheses for future memory use
-    if (result?.hypotheses) {
-      session.hypotheses = result.hypotheses;
-      await saveSession(sessionId, session);
-    }
+    // Successful run — clear gate state, nothing left to resume
+    session.analysis     = null;
+    session.competingIds = null;
+    await saveSession(sessionId, session);
   } catch (err) {
     console.error("[/pipeline/run]", err);
     send({ type: "error", message: err.message });

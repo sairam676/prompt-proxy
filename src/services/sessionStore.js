@@ -20,9 +20,11 @@ export const createSession = async (sessionId, rawIntent) => {
     createdAt:              Date.now(),
 
     // Hypothesis Engine / Sufficiency Gate state
-    hypotheses:             null,   // last set of hypotheses from extractAndAnalyze
-    awaitingTieBreak:       false,  // true when the gate blocked and we're waiting on a targeted answer
-    tieBreakQuestion:       null,
+    analysis:                null,   // full prior analysis (hypotheses + problem_area + severity + ...), kept for resuming
+    competingIds:            null,   // ids of the two hypotheses that were tied, for targeted re-score
+    awaitingTieBreak:        false,  // true when the gate blocked and we're waiting on a targeted answer
+    tieBreakQuestion:        null,
+    pendingTieBreakAnswer:   null,   // set by /reply once the user answers, consumed by the next SSE run
   };
   await saveSession(sessionId, session);
   return session;

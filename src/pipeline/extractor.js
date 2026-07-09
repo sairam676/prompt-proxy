@@ -115,6 +115,64 @@ export const buildSurgicalPrompt = async (diagnosis, userContext, onStep) => {
   return surgical_prompt;
 };
 
+/**
+ * rescoreHypotheses — Hypothesis Memory
+ *
+ * Called when the user answers a tie-break question. Instead of throwing
+ * away prior hypotheses and re-running extractAndAnalyze from scratch, this
+ * sends ONLY the two previously-competing hypotheses plus the new answer,
+ * and asks for updated confidence/evidence for just those two. Everything
+ * else in the hypothesis set is carried forward unchanged by the caller
+ * (see sufficiencyGate.mergeHypotheses).
+ */
+const RESCORE_PROMPT = `
+You previously proposed competing hypotheses for a problem. The user has now answered
+a question specifically meant to break the tie between two of them. Re-score ONLY
+those two hypotheses given this new evidence. Do not introduce new hypotheses.
+
+If the new evidence clearly confirms one and rules out the other, the scores should
+now be decisively far apart (e.g. 90+ vs under 20). If the answer is still ambiguous
+between the two, keep them close but update evidence_for/evidence_against to reflect
+what was learned.
+
+Output ONLY this JSON:
+{
+  "hypotheses": [
+    { "id": "same id as given", "confidence": 0, "evidence_for": "updated", "evidence_against": "updated" }
+  ]
+}
+`.trim();
+
+export const rescoreHypotheses = async (competingHypotheses, newAnswer, userContext, onStep) => {
+  onStep({ type: "status", message: "Updating hypotheses with your answer..." });
+
+  const response = await groq.chat.completions.create({
+    model:    "llama-3.1-8b-instant", // narrow, cheap re-score — doesn't need the 70B model
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: RESCORE_PROMPT },
+      {
+        role:    "user",
+        content: JSON.stringify({
+          competing_hypotheses: competingHypotheses,
+          user_answer:          newAnswer,
+          full_context:         formatContext(userContext),
+        }),
+      },
+    ],
+  });
+
+  const { hypotheses } = JSON.parse(response.choices[0].message.content.trim());
+
+  onStep({
+    type:    "rescore_done",
+    message: "Hypotheses updated",
+    data:    { hypotheses },
+  });
+
+  return hypotheses;
+};
+
 const formatContext = (ctx) => {
   const parts = [];
   if (ctx.goal)             parts.push(`Goal: ${ctx.goal}`);

@@ -17,6 +17,7 @@ export const isSufficient = (hypotheses = []) => {
     return {
       sufficient:      false,
       diagnosis:       null,
+      competingIds:    [],
       tieBreakQuestion: "I don't have enough to form any hypothesis yet — can you share the error and relevant code?",
     };
   }
@@ -28,30 +29,33 @@ export const isSufficient = (hypotheses = []) => {
                       (second?.confidence ?? 0) < RUNNER_UP_CEILING;
 
   if (sufficient) {
-    return { sufficient: true, diagnosis: top, tieBreakQuestion: null };
+    return { sufficient: true, diagnosis: top, competingIds: [], tieBreakQuestion: null };
   }
 
-  // Not sufficient — build a targeted question that would break the tie
-  // between the top two competing hypotheses.
+  // Not sufficient — the top two are the ones worth re-scoring next turn,
+  // so hand their ids back to the caller (session gets to persist just these).
+  const competingIds = [top.id, second?.id].filter(Boolean);
+
   const tieBreakQuestion = second
     ? buildTieBreakQuestion(top, second)
     : `I'm not fully confident yet — ${top.evidence_against || "what would confirm or rule out: " + top.theory}?`;
 
-  return { sufficient: false, diagnosis: null, tieBreakQuestion };
+  return { sufficient: false, diagnosis: null, competingIds, tieBreakQuestion };
 };
 
 const buildTieBreakQuestion = (top, second) => {
-  // Prefer asking about whatever would rule OUT the weaker/ambiguous side —
-  // that's the fastest way to collapse to one hypothesis.
-  const disambiguator = top.evidence_against || second.evidence_for;
-  return `To narrow this down between "${top.theory}" and "${second.theory}": ${disambiguator}?`;
+  return `To isolate whether this is "${top.theory}" vs "${second.theory}", I need one specific data point: ${
+    top.confidence > second.confidence
+      ? second.evidence_against  // what would rule out the runner-up
+      : top.evidence_against     // what would confirm the leader
+  }. Can you check and confirm?`;
 };
 
 /**
- * updateHypotheses — used by hypothesis memory (session-scoped).
- * Applies a new answer as a lightweight re-score rather than discarding
- * prior hypotheses and starting over. The actual re-scoring call is Groq-based
- * (see extractAndAnalyze); this just merges the result back in by id.
+ * mergeHypotheses — merges a re-scored subset of hypotheses back into the
+ * full set by id. Used when resuming after a tie-break answer: only the
+ * previously-competing pair gets re-scored, everything else is carried
+ * forward unchanged.
  */
 export const mergeHypotheses = (existing = [], updated = []) => {
   const byId = new Map(existing.map(h => [h.id, h]));

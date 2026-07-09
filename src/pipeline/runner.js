@@ -19,8 +19,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI    from "openai";
 import Groq      from "groq-sdk";
-import { extractAndAnalyze, buildSurgicalPrompt } from "./extractor.js";
-import { isSufficient }  from "./sufficiencyGate.js";
+import { extractAndAnalyze, buildSurgicalPrompt, rescoreHypotheses } from "./extractor.js";
+import { isSufficient, mergeHypotheses } from "./sufficiencyGate.js";
 import { verifyFix }     from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
 
@@ -127,22 +127,42 @@ Be as detailed as the task requires — do not truncate important information.`;
 };
 
 // ── Main pipeline ──────────────────────────────────────────────────────────────
-export const runPipeline = async (structuredContext, provider, apiKey, onStep) => {
+// resume (optional): { analysis, competingIds, newAnswer } — set when this call
+// is resuming after a tie-break answer, so we skip full re-generation and only
+// re-score the two hypotheses that were competing.
+export const runPipeline = async (structuredContext, provider, apiKey, onStep, resume = null) => {
 
-  // Step 1: Hypothesis Engine — our Groq, free
-  onStep({ type: "step", step: 1, total: 5, message: "Generating competing hypotheses..." });
-  const analysis = await extractAndAnalyze(structuredContext, onStep);
+  let analysis;
+
+  if (resume?.analysis && resume?.competingIds?.length && resume?.newAnswer) {
+    // Step 1 (resumed): re-score only the previously-competing pair — cheap, targeted
+    onStep({ type: "step", step: 1, total: 5, message: "Re-scoring hypotheses with your answer..." });
+    const competing = resume.analysis.hypotheses.filter(h => resume.competingIds.includes(h.id));
+    const rescored  = await rescoreHypotheses(competing, resume.newAnswer, structuredContext, onStep);
+    analysis = {
+      ...resume.analysis,
+      hypotheses: mergeHypotheses(resume.analysis.hypotheses, rescored),
+    };
+  } else {
+    // Step 1 (fresh): Hypothesis Engine — our Groq, free
+    onStep({ type: "step", step: 1, total: 5, message: "Generating competing hypotheses..." });
+    analysis = await extractAndAnalyze(structuredContext, onStep);
+  }
 
   // Step 1b: Sufficiency Gate
   const gate = isSufficient(analysis.hypotheses);
   if (!gate.sufficient) {
     // Not confident enough to proceed — hand a targeted question back to the
-    // caller instead of guessing. The caller (routes/pipeline.js) is expected
-    // to route this back into the interview loop rather than calling the user's LLM.
+    // caller instead of guessing, along with enough state (analysis + which
+    // ids are competing) to resume with a targeted re-score next turn instead
+    // of starting over. The caller (routes/pipeline.js) is expected to route
+    // this back into the interview loop rather than calling the user's LLM.
     const result = {
       blocked:          true,
       reason:           "insufficient_evidence",
       hypotheses:       analysis.hypotheses,
+      analysis,
+      competingIds:     gate.competingIds,
       tieBreakQuestion: gate.tieBreakQuestion,
     };
     onStep({ type: "gate_blocked", message: "Insufficient evidence to isolate cause", data: result });
