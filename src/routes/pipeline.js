@@ -11,10 +11,9 @@
  */
 
 import express from "express";
-import { getSession, saveSession } from "../services/sessionStore.js";
+import { getSession, saveSession, createSession } from "../services/sessionStore.js";
 import { runInterviewTurn, forceExtractContext } from "../middleware/interviewer.js";
 import { runPipeline } from "../pipeline/runner.js";
-import { createSession, getSession as getsess } from "../services/sessionStore.js";
 import { v4 as uuidv4 } from "uuid";
 
 const router = express.Router();
@@ -27,7 +26,6 @@ router.post("/start", async (req, res) => {
     if (!message?.trim()) return res.status(400).json({ error: "message is required" });
 
     const sessionId = uuidv4();
-    const { createSession } = await import("../services/sessionStore.js");
     const session = await createSession(sessionId, message.trim());
 
     const result = await runInterviewTurn(message, []);
@@ -61,6 +59,27 @@ router.post("/reply", async (req, res) => {
 
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    // ── Tie-break answer: the interview already finished once, the
+    // Sufficiency Gate blocked mid-pipeline and asked a targeted question.
+    // Don't re-run the interviewer LLM (it already said "ready" and would
+    // get confused) — just append the answer to existing_context, same
+    // pattern as chat.js's /supplement endpoint, and let the pipeline
+    // re-run the Hypothesis Engine fresh on the next SSE call.
+    if (session.awaitingTieBreak) {
+      const ctx = session.structuredContext ?? {};
+      ctx.existing_context = ctx.existing_context
+        ? `${ctx.existing_context}\n\n${message}` : message;
+      ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
+
+      session.structuredContext = ctx;
+      session.status            = "complete";
+      session.awaitingTieBreak  = false;
+      session.tieBreakQuestion  = null;
+      await saveSession(sessionId, session);
+
+      return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
+    }
 
     if (userDone) {
       const context = await forceExtractContext(session.history);
@@ -125,8 +144,30 @@ router.get("/run/:sessionId", async (req, res) => {
       send({ type: "error", message: "Interview not complete" });
       return res.end();
     }
-console.log("CTX:", JSON.stringify(session.structuredContext, null, 2));
-    await runPipeline(session.structuredContext, provider, apiKey, send);
+
+    const result = await runPipeline(session.structuredContext, provider, apiKey, send);
+
+    // ── Sufficiency Gate blocked — hand the tie-break question back to the
+    // frontend as a "needs_info" event (App.jsx already listens for this
+    // exact type and switches phase to "interviewing"). Persist the gate
+    // state on the session so /reply knows to treat the next message as
+    // a tie-break answer, not a fresh interview turn.
+    if (result?.blocked && result.reason === "insufficient_evidence") {
+      session.status           = "interviewing";
+      session.awaitingTieBreak = true;
+      session.tieBreakQuestion = result.tieBreakQuestion;
+      session.hypotheses       = result.hypotheses;
+      await saveSession(sessionId, session);
+
+      send({ type: "needs_info", message: result.tieBreakQuestion });
+      return res.end();
+    }
+
+    // Successful run — persist final hypotheses for future memory use
+    if (result?.hypotheses) {
+      session.hypotheses = result.hypotheses;
+      await saveSession(sessionId, session);
+    }
   } catch (err) {
     console.error("[/pipeline/run]", err);
     send({ type: "error", message: err.message });

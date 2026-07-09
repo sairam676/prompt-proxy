@@ -63,7 +63,14 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (data.status === "complete") {
-        setPhase("key");
+        // If we already have a key (this was a tie-break answer resuming
+        // a pipeline that already asked for the key once), just resume
+        // the run automatically instead of asking again.
+        if (data.resumedFromTieBreak && apiKey.trim()) {
+          runPipeline();
+        } else {
+          setPhase("key");
+        }
       } else {
         addMsg("bot", data.question);
       }
@@ -268,7 +275,10 @@ function StepCard({ step }) {
     step:               "⚙",
     status:             "⟳",
     extraction_done:    "🔍",
+    diagnosis:          "🎯",
+    gate_blocked:       "❓",
     llm_done:           "⚡",
+    verification_done:  "🛡",
     interpretation_done:"✅",
   };
 
@@ -281,7 +291,9 @@ function StepCard({ step }) {
         <p style={ST.msg}>{step.message}</p>
         {step.data && step.type === "extraction_done" && (
           <div style={ST.tags}>
-            <Tag label="Root cause" value={step.data.rootCause} />
+            {step.data.hypotheses?.[0] && (
+              <Tag label="Top hypothesis" value={`${step.data.hypotheses[0].theory} (${step.data.hypotheses[0].confidence}%)`} />
+            )}
             <Tag label="Area"       value={step.data.problemArea} />
             <Tag label="Severity"   value={step.data.severity} color={step.data.severity === "high" ? "#dc2626" : step.data.severity === "medium" ? "#d97706" : "#059669"} />
           </div>
@@ -309,10 +321,11 @@ function Tag({ label, value, color }) {
 // ── Final result card ──────────────────────────────────────────────────────────
 function ResultCard({ result }) {
   const {
-    interpretation, rootCause, keyInsight, severity,
+    interpretation, diagnosis, keyInsight, severity,
     tokensSaved, surgicalPrompt, rawLLMResponse,
-    whatToVerify, potentialRisks,
+    whatToVerify, potentialRisks, verification,
   } = result;
+  const rootCause = diagnosis?.theory ?? result.rootCause; // fallback for older result shape
 
   const [tab, setTab]       = useState("action");
   const [copied, setCopied] = useState(false);
@@ -338,6 +351,17 @@ function ResultCard({ result }) {
           {tokensSaved > 0 && (
             <span style={{ ...R.chip, background: "#d1fae5", color: "#065f46" }}>
               ~{tokensSaved} tokens saved
+            </span>
+          )}
+          {verification?.status && (
+            <span style={{
+              ...R.chip,
+              background: verification.status === "verified" ? "#d1fae5"
+                : verification.status === "rejected" ? "#fee2e2" : "#fef3c7",
+              color: verification.status === "verified" ? "#065f46"
+                : verification.status === "rejected" ? "#991b1b" : "#92400e",
+            }}>
+              fix {verification.status}
             </span>
           )}
         </div>

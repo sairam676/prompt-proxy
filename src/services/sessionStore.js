@@ -18,6 +18,11 @@ export const createSession = async (sessionId, rawIntent) => {
     structuredContext:      null,
     interviewerTokensUsed:  0,
     createdAt:              Date.now(),
+
+    // Hypothesis Engine / Sufficiency Gate state
+    hypotheses:             null,   // last set of hypotheses from extractAndAnalyze
+    awaitingTieBreak:       false,  // true when the gate blocked and we're waiting on a targeted answer
+    tieBreakQuestion:       null,
   };
   await saveSession(sessionId, session);
   return session;
