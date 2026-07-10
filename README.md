@@ -1,168 +1,147 @@
-# ⚡ PromptProxy
+# PromptProxy
 
-> LLM middleware that interviews you before calling AI — stops hallucinations and cuts token usage by 40–70%.
+We extract. We brief. Your LLM solves it right.
 
-**Live demo → [prompt-proxy-mocha.vercel.app](https://prompt-proxy-mocha.vercel.app)**
+PromptProxy is a middleware layer that sits between you and your LLM. Instead of
+you going back and forth with your LLM guessing at what's wrong, PromptProxy
+interviews you, forms and tests competing hypotheses about the actual cause,
+verifies the fix your LLM proposes, and hands you a clean action plan — one
+LLM call, not five.
 
----
+## Why
 
-## The problem
+Talking directly to a big LLM about a real bug usually means: you under-describe
+the problem, the LLM guesses, guesses wrong, you clarify, it guesses again,
+and three round-trips later you have a fix that may or may not actually be
+correct — with no one checking it before you paste it into your codebase.
 
-Most people prompt AI blindly with vague requests like *"explain RAG"* or *"write me an email"*. The LLM guesses intent, hallucinates context, and you spend 3–5 back-and-forth turns getting what you actually wanted — burning tokens the whole time.
+PromptProxy's job is to be the layer that:
+- Extracts full context before ever calling the expensive LLM
+- Refuses to guess when it's genuinely ambiguous — asks ONE targeted question instead
+- Sends exactly one surgical, complete prompt to your LLM
+- Verifies the fix (syntax/type/API checks, plus a real npm registry lookup for
+  fabricated packages) before showing it to you
+- Strips padding — one fix per diagnosed issue, not a menu of five options
 
-## The solution
-
-PromptProxy sits between you and the LLM. It acts as a smart interviewer — asks you targeted questions to extract exactly what you need, builds a tight structured prompt, then calls the LLM once with the minimum tokens required.
+## Architecture
 
 ```
-Your vague request
-      ↓
-Interviewer LLM (asks 1–4 focused questions)
-      ↓
-Structured context extracted
-      ↓
-Redis cache check → HIT: instant response
-      ↓ MISS
-Task classifier → picks token budget template
-      ↓
-Optimized prompt built (role + context + task + format)
-      ↓
-LLM called with dynamic max_tokens
-      ↓
-Clean response + token savings report
+User message
+    │
+    ▼
+Interviewer (Groq, llama-3.3-70b)         middleware/interviewer.js
+    │  extracts structured_context from the conversation
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Debugging task?                                          │
+│  ── no  → simple path: one prompt, one LLM call, done      │
+│  ── yes → full pipeline below                              │
+└─────────────────────────────────────────────────────────┘
+    │
+    ▼
+Hypothesis Engine (Groq)                   pipeline/extractor.js
+    │  generates 2-4 competing hypotheses PER distinct issue
+    │  (a report can describe multiple independent bugs)
+    ▼
+Sufficiency Gate                           pipeline/sufficiencyGate.js
+    │  top hypothesis > 80% confidence AND runner-up < 40% → proceed
+    │  otherwise → ask a targeted tie-break question, scoped to
+    │  only the ambiguous issue (resolved issues aren't re-asked)
+    │
+    │  user can force through at any point ("that's all I have") —
+    │  takes the current top hypothesis per issue as-is
+    ▼
+Surgical Prompt Builder (Groq)             pipeline/extractor.js
+    │  one complete prompt per diagnosis, explicit "no menu of
+    │  options" instruction, one fix per issue if multiple
+    ▼
+Your LLM (Claude / OpenAI / Groq — your key, your credits)
+    │  exactly ONE call
+    ▼
+Fix Verifier                               pipeline/fixVerifier.js
+    │  LLM check: syntax, types, standard-library API correctness
+    │  DETERMINISTIC check: imported npm packages verified against
+    │  the real registry — not another LLM's guess
+    ▼
+Interpreter (Groq)                         pipeline/interpreter.js
+    │  builds the final action plan, tags each section with its
+    │  issue + verification status, enforces one-fix-per-issue
+    ▼
+Result shown to user
 ```
 
----
-
-## Features
-
-- **Smart interviewer** — Llama 3.3 70B asks targeted clarifying questions, max 4 turns
-- **Task classification** — detects code / analysis / creative / factual / summarization / transformation and applies the right token budget
-- **Anti-hallucination** — strict output format constraints prevent the LLM from drifting or over-generating
-- **Redis caching** — identical intents return instantly with zero API cost
-- **Token savings dashboard** — shows naive vs optimized token count, actual cost, and budget fit
-- **Dynamic max_tokens** — output cap set per task type, not hardcoded
-
----
-
-## Tech stack
-
-| Layer | Tech |
-|-------|------|
-| Backend | Node.js, Express |
-| Interviewer LLM | Groq (Llama 3.3 70B) |
-| Cache | Upstash Redis |
-| Frontend | React, Vite |
-| Deploy | Render (backend), Vercel (frontend) |
-
----
-
-## How it works
-
-### 1. Interview phase
-User sends a raw prompt. The interviewer LLM asks one focused question at a time — goal, format, constraints, audience — until it has enough context. Max 4 questions.
-
-### 2. Task classification
-The structured context is classified into one of 6 task types using keyword signals. Each type has a token budget template with preset ranges per bucket and a `maxOutputTokens` cap.
-
-### 3. Prompt building
-Two hard rules on every prompt:
-- **Role + context + task + format** — no filler words
-- **"If unsure, say so"** — prevents hallucination without blocking general knowledge
-
-### 4. Redis cache
-Context is SHA-256 hashed. On a cache hit, the LLM is skipped entirely. TTL: 24 hours.
-
-### 5. Token tracking
-- Before call: character-based estimate (1 token ≈ 4 chars)
-- After call: Anthropic/Groq actual `usage.prompt_tokens` and `usage.completion_tokens`
-
----
-
-## Run locally
+## Setup
 
 ```bash
-# Clone
-git clone https://github.com/sairam676/prompt-proxy.git
-cd prompt-proxy
-
-# Install backend dependencies
-npm install
-
-# Setup env
-cp .env.example .env
-# Fill in GROQ_API_KEY and REDIS_URL
-
-# Start backend
-npm run dev
-
-# In a second terminal — start frontend
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install
+cd .. && npm install
 ```
 
-Open `http://localhost:5173`
-
-### Environment variables
-
-```env
-GROQ_API_KEY=gsk_...          # from console.groq.com (free)
-REDIS_URL=rediss://...         # from upstash.com (free)
-PORT=3000
-NODE_ENV=development
-CACHE_TTL=86400
-MAX_TURNS=4
+Environment variables (`.env`):
+```
+GROQ_API_KEY=          # required — powers the interviewer/hypothesis/verifier/interpreter
+REDIS_URL=              # session storage
+TEST_LLM_PROVIDER=      # optional, for local testing without going through the /key screen
+TEST_LLM_KEY=
+VERIFIER_V2=false        # flip to true to enable semantic/concurrency checks (heavier)
 ```
 
----
-
-## API
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/chat/start` | Send raw prompt, begin interview |
-| POST | `/api/chat/reply` | Answer an interviewer question |
-| POST | `/api/chat/execute` | Build prompt + call LLM |
-| GET | `/api/chat/analytics/:id` | Token savings for session |
-| GET | `/health` | Health check |
-
----
+Run:
+```bash
+node src/server.js       # backend
+cd frontend && npm run dev   # frontend
+```
 
 ## Project structure
 
 ```
-prompt-proxy/
-├── src/
-│   ├── server.js                   ← Express entry point
-│   ├── routes/chat.js              ← Orchestrator
-│   ├── middleware/
-│   │   ├── interviewer.js          ← Q&A loop (core IP)
-│   │   ├── promptBuilder.js        ← Context → tight prompt
-│   │   ├── taskClassifier.js       ← Task type + budget template
-│   │   └── tokenEstimator.js       ← Token counting + savings
-│   ├── cache/redis.js              ← Response cache + analytics
-│   └── services/
-│       ├── claude.js               ← LLM API call
-│       └── sessionStore.js         ← Interview state
-└── frontend/src/
-    └── App.jsx                     ← React UI
+src/
+├── middleware/
+│   ├── interviewer.js       interview loop — extracts structured_context
+│   ├── correctnessLayer.js  pre-pipeline check for missing critical facts
+│   ├── promptBuilder.js
+│   ├── taskClassifier.js
+│   └── tokenEstimator.js
+├── pipeline/
+│   ├── extractor.js         hypothesis engine + surgical prompt builder
+│   ├── sufficiencyGate.js   confidence gate, multi-issue grouping, force-proceed
+│   ├── fixVerifier.js       LLM checks + deterministic npm registry check
+│   ├── interpreter.js       final action plan, relevance constraint, verification tagging
+│   └── runner.js            orchestrates the full pipeline
+├── routes/
+│   ├── chat.js               older single-shot prompt-building flow
+│   └── pipeline.js           SSE pipeline flow (interview → run → tie-break loop)
+├── services/
+│   └── sessionStore.js       Redis-backed session state
+└── cache/redis.js
+
+frontend/src/App.jsx           chat UI + live pipeline step feed + result card
 ```
 
----
+## Known issues / in progress
 
-## Roadmap
+- **Interviewer JSON leak**: when the interviewer's raw JSON response contains
+  unescaped characters (common with pasted code blocks with backticks/quotes),
+  `JSON.parse` fails silently and the raw JSON can leak into the chat as a
+  message instead of being parsed. Fix in progress in `interviewer.js`.
+- **Task-type gating** (`isDebuggingTask` in `runner.js`) is a regex heuristic,
+  not a real classifier — `taskClassifier.js` exists in the repo but isn't
+  wired into the pipeline route yet. Works for obvious cases, may misclassify
+  edge cases.
+- **`chat.js` and `pipeline.js` are largely duplicate interview flows.**
+  `chat.js` is the older single-shot flow; `pipeline.js` is the current
+  SSE-based one with the full hypothesis/gate/verify pipeline. Worth
+  consolidating once the pipeline flow is stable.
+- **Verifier LLM checks (syntax/types/API) are opinion-based**, not
+  deterministic — only the npm package existence check is a real lookup.
+  Worth extending the same pattern (real checks over LLM guesses) to syntax
+  validation (e.g. actually running a parser) where feasible.
 
-- [ ] Semantic cache (embedding similarity at 0.92 threshold)
-- [ ] Streaming responses via SSE
-- [ ] User accounts + cross-session savings dashboard
-- [ ] Prompt template library
-- [ ] Support for OpenAI, Gemini, Claude model switching
+## Design principle
 
----
-
-## Author
-
-**Sairam Devarasetty** — [linkedin.com/in/sairamdevarasetty676](https://linkedin.com/in/sairamdevarasetty676) · [github.com/sairam676](https://github.com/sairam676)
-
-NIT Patna · CS 2027
+Prompts are not the last line of defense. Anything that can be checked
+deterministically (does this package exist, is this JSON valid, is this
+confidence score above a threshold) should be — LLM judgment is reserved for
+things that genuinely require reasoning (does this fix address the diagnosed
+cause, is this the standard approach). This is an ongoing effort, not fully
+applied everywhere yet — see Known issues above.
