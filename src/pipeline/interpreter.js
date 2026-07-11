@@ -12,13 +12,30 @@ Be comprehensive. Do not artificially shorten. Every important piece of informat
 from the LLM response must surface in your output.
 
 RELEVANCE CONSTRAINT (strict):
-Every output_section must trace directly to the confirmed root cause, the key insight,
-or a specifically confirmed risk. Do NOT include generic infrastructure suggestions
-(load balancing, database connection pooling, Kafka, Kubernetes tuning, caching layers,
-etc.) unless the user's own context specifically mentions that system already being in use.
-If the LLM response includes such padding, drop it from the main sections.
-Anything genuinely useful but not essential to the diagnosed cause goes in exactly ONE
-section titled "Optional" — never mixed into the main output_sections.
+You will be given the confirmed diagnoses — this may be ONE diagnosis or an array of
+several, if the user's report described multiple distinct, independent issues.
+
+Every output_section must trace directly to one of the confirmed diagnoses, the key
+insight, or a specifically confirmed risk. Do NOT include generic infrastructure
+suggestions (load balancing, database connection pooling, Kafka, Kubernetes tuning,
+caching layers, etc.) unless the user's own context specifically mentions that system
+already being in use.
+
+TWO DIFFERENT SITUATIONS — do not confuse them:
+1. MULTIPLE ALTERNATIVE APPROACHES TO THE SAME DIAGNOSED ISSUE (e.g. "you could use
+   Redis, or Memcached, or a message queue" for ONE confirmed cause): this is padding.
+   Pick the ONE most standard/conventional approach and present ONLY that as the fix,
+   with its full code. Mention the alternatives, if at all, in one sentence inside the
+   "Optional" section.
+2. MULTIPLE GENUINELY DISTINCT DIAGNOSED ISSUES (the diagnoses array has more than one
+   entry — e.g. a race condition in checkout AND an unrelated memory leak elsewhere):
+   these are NOT alternatives to each other. Give each its own clearly labeled fix with
+   its own full code, tagged with which diagnosed issue it addresses. Do not merge them
+   into one section, and do not present them as a menu the user picks from — the user
+   needs to fix ALL of them.
+
+Anything genuinely useful but not essential to any of the diagnosed issues goes in
+exactly ONE section titled "Optional" — never mixed into the main output_sections.
 
 Build output_sections dynamically based on what THIS task needs:
 - Bug fix → exact fix with full corrected code, why it works, test steps, edge cases  
@@ -46,6 +63,7 @@ Output ONLY this JSON:
       "title": "section title",
       "content": "complete detailed content — for code sections paste verbatim",
       "type": "text|code|list|steps|warning|tip",
+      "issue_id": "which diagnosed issue this addresses — omit if there's only one diagnosis",
       "verification_status": "verified|unverified|rejected|null",
       "verification_note": "only present if verification_status is rejected"
     }
@@ -68,7 +86,7 @@ export const interpretResponse = async (llmResponse, analysis, userContext, veri
         role:    "user",
         content: JSON.stringify({
           task:         userContext.goal ?? userContext.raw_intent,
-          root_cause:   analysis.root_cause ?? analysis.diagnosis?.theory,
+          diagnoses:    analysis.diagnoses ?? [{ theory: analysis.root_cause }],
           key_insight:  analysis.key_insight,
           llm_response: llmResponse,
           verification: verification ?? { status: "unverified", issues: [], notes: "No verifier run." },
@@ -79,6 +97,24 @@ export const interpretResponse = async (llmResponse, analysis, userContext, veri
   });
 
   const interpretation = JSON.parse(response.choices[0].message.content.trim());
+
+  // Fallback enforcement: don't trust the LLM to remember verification_status
+  // on every code section. If it forgot, attach the actual verifier result
+  // directly so the UI always has something to show.
+  if (interpretation.output_sections?.length && verification?.status) {
+    interpretation.output_sections = interpretation.output_sections.map(section => {
+      if (section.type === "code" && !section.verification_status) {
+        return {
+          ...section,
+          verification_status: verification.status,
+          ...(verification.status === "rejected" && {
+            verification_note: verification.notes || verification.issues?.map(i => i.description).join("; "),
+          }),
+        };
+      }
+      return section;
+    });
+  }
 
   onStep({
     type:    "interpretation_done",

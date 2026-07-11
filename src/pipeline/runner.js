@@ -20,7 +20,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI    from "openai";
 import Groq      from "groq-sdk";
 import { extractAndAnalyze, buildSurgicalPrompt, rescoreHypotheses } from "./extractor.js";
-import { isSufficient, mergeHypotheses } from "./sufficiencyGate.js";
+import { isSufficient, mergeHypotheses, forceTopDiagnoses } from "./sufficiencyGate.js";
 import { verifyFix }     from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
 
@@ -130,51 +130,96 @@ Be as detailed as the task requires — do not truncate important information.`;
 // resume (optional): { analysis, competingIds, newAnswer } — set when this call
 // is resuming after a tie-break answer, so we skip full re-generation and only
 // re-score the two hypotheses that were competing.
+const isDebuggingTask = (ctx) => {
+  const text = `${ctx.goal ?? ""} ${ctx.raw_intent ?? ""}`.toLowerCase();
+  return /bug|error|crash|fix|debug|not working|failing|broken|exception|leak|slow|timeout|security|vulnerability|race|deadlock|performance/.test(text)
+    || !!ctx.existing_context;
+};
+
 export const runPipeline = async (structuredContext, provider, apiKey, onStep, resume = null) => {
 
-  let analysis;
+  // Simple-task bypass: skip the entire hypothesis engine/gate machinery for
+  // non-debugging tasks (e.g. "explain Java OOPs", "write a LinkedIn post").
+  // Only applies to fresh calls — a resume implies we're already mid tie-break
+  // in a debugging flow, so this check doesn't need to run again there.
+  if (!resume && !isDebuggingTask(structuredContext)) {
+    onStep({ type: "step", step: 1, total: 2, message: "Building prompt..." });
+    const simplePrompt = `Task: ${structuredContext.goal ?? structuredContext.raw_intent}\n\n${
+      structuredContext.constraints ? `Constraints: ${structuredContext.constraints}` : ""
+    }`.trim();
 
-  if (resume?.analysis && resume?.competingIds?.length && resume?.newAnswer) {
-    // Step 1 (resumed): re-score only the previously-competing pair — cheap, targeted
-    onStep({ type: "step", step: 1, total: 5, message: "Re-scoring hypotheses with your answer..." });
-    const competing = resume.analysis.hypotheses.filter(h => resume.competingIds.includes(h.id));
-    const rescored  = await rescoreHypotheses(competing, resume.newAnswer, structuredContext, onStep);
-    analysis = {
-      ...resume.analysis,
-      hypotheses: mergeHypotheses(resume.analysis.hypotheses, rescored),
-    };
-  } else {
-    // Step 1 (fresh): Hypothesis Engine — our Groq, free
-    onStep({ type: "step", step: 1, total: 5, message: "Generating competing hypotheses..." });
-    analysis = await extractAndAnalyze(structuredContext, onStep);
-  }
+    onStep({ type: "step", step: 2, total: 2, message: "Calling your LLM..." });
+    const llmResponse = await callUserLLM(provider, apiKey, simplePrompt, "simple", onStep);
 
-  // Step 1b: Sufficiency Gate
-  const gate = isSufficient(analysis.hypotheses);
-  if (!gate.sufficient) {
-    // Not confident enough to proceed — hand a targeted question back to the
-    // caller instead of guessing, along with enough state (analysis + which
-    // ids are competing) to resume with a targeted re-score next turn instead
-    // of starting over. The caller (routes/pipeline.js) is expected to route
-    // this back into the interview loop rather than calling the user's LLM.
+    const interpretation = await interpretResponse(
+      llmResponse,
+      { root_cause: structuredContext.goal, key_insight: null },
+      structuredContext,
+      null,
+      onStep
+    );
+
     const result = {
-      blocked:          true,
-      reason:           "insufficient_evidence",
-      hypotheses:       analysis.hypotheses,
-      analysis,
-      competingIds:     gate.competingIds,
-      tieBreakQuestion: gate.tieBreakQuestion,
+      blocked: false, diagnoses: [], hypotheses: [],
+      surgicalPrompt: simplePrompt, rawLLMResponse: llmResponse,
+      interpretation, severity: "low", tokensSaved: 0,
     };
-    onStep({ type: "gate_blocked", message: "Insufficient evidence to isolate cause", data: result });
+    onStep({ type: "done", message: "Done", data: result });
     return result;
   }
 
-  const diagnosis = gate.diagnosis;
-  onStep({ type: "diagnosis", message: "Diagnosis confirmed", data: diagnosis });
+  let analysis;
+  let diagnoses; // set directly when forced, otherwise comes from the gate below
 
-  // Step 2: Build surgical prompt from the CONFIRMED diagnosis — our Groq, free
+  if (resume?.newAnswer === "__force__") {
+    // User explicitly gave up on answering more tie-break questions.
+    // Don't rescore, don't re-run the gate (it would just fail the same way
+    // again on unchanged scores) — take the current top hypothesis per
+    // issue group as-is, tagged forced so the rest of the pipeline can be
+    // honest about it not being a confident match.
+    onStep({ type: "status", message: "Proceeding with best available hypothesis (forced)..." });
+    analysis   = resume.analysis;
+    diagnoses  = forceTopDiagnoses(analysis.hypotheses);
+    onStep({ type: "diagnosis", message: `Proceeding without full confidence (${diagnoses.length} issue${diagnoses.length > 1 ? "s" : ""})`, data: diagnoses });
+
+  } else {
+    if (resume?.analysis && resume?.competingIds?.length && resume?.newAnswer) {
+      // Step 1 (resumed): re-score only the previously-competing pair — cheap, targeted
+      onStep({ type: "step", step: 1, total: 5, message: "Re-scoring hypotheses with your answer..." });
+      const competing = resume.analysis.hypotheses.filter(h => resume.competingIds.includes(h.id));
+      const rescored  = await rescoreHypotheses(competing, resume.newAnswer, structuredContext, onStep);
+      analysis = {
+        ...resume.analysis,
+        hypotheses: mergeHypotheses(resume.analysis.hypotheses, rescored),
+      };
+    } else {
+      // Step 1 (fresh): Hypothesis Engine — our Groq, free
+      onStep({ type: "step", step: 1, total: 5, message: "Generating competing hypotheses..." });
+      analysis = await extractAndAnalyze(structuredContext, onStep);
+    }
+
+    // Step 1b: Sufficiency Gate
+    const gate = isSufficient(analysis.hypotheses);
+    if (!gate.sufficient) {
+      const result = {
+        blocked:          true,
+        reason:           "insufficient_evidence",
+        hypotheses:       analysis.hypotheses,
+        analysis,
+        competingIds:     gate.competingIds,
+        tieBreakQuestion: gate.tieBreakQuestion,
+      };
+      onStep({ type: "gate_blocked", message: "Insufficient evidence to isolate cause", data: result });
+      return result;
+    }
+
+    diagnoses = gate.diagnoses; // array — one per distinct issue
+    onStep({ type: "diagnosis", message: `Diagnosis confirmed (${diagnoses.length} issue${diagnoses.length > 1 ? "s" : ""})`, data: diagnoses });
+  }
+
+  // Step 2: Build surgical prompt from the CONFIRMED diagnosis/diagnoses — our Groq, free
   onStep({ type: "step", step: 2, total: 5, message: "Building surgical prompt..." });
-  const surgicalPrompt = await buildSurgicalPrompt(diagnosis, structuredContext, onStep);
+  const surgicalPrompt = await buildSurgicalPrompt(diagnoses, structuredContext, onStep);
 
   // Step 3: Call their LLM once with surgical prompt — their credits
   onStep({ type: "step", step: 3, total: 5, message: "Calling your LLM with surgical prompt..." });
@@ -191,14 +236,18 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
 
   // Step 5: Interpret — our Groq, free
   onStep({ type: "step", step: 5, total: 5, message: "Building your action plan..." });
-  const analysisForInterpreter = { root_cause: diagnosis.theory, key_insight: analysis.key_insight };
+  const analysisForInterpreter = {
+    diagnoses,
+    root_cause:  diagnoses.length === 1 ? diagnoses[0].theory : undefined,
+    key_insight: analysis.key_insight,
+  };
   const interpretation = await interpretResponse(
     llmResponse, analysisForInterpreter, structuredContext, verification, onStep
   );
 
   const result = {
     blocked:        false,
-    diagnosis,
+    diagnoses,
     hypotheses:     analysis.hypotheses,
     problemArea:    analysis.problem_area,
     severity:       analysis.severity,

@@ -62,17 +62,64 @@ export const runInterviewTurn = async (userMessage, history = []) => {
           usage:   response.usage,
         };
       }
-    } catch (_) {}
+      // Parsed fine but didn't have the expected shape — genuinely still
+      // interviewing, fall through to the normal question path below.
+    } catch (_) {
+      // JSON.parse threw — near-certainly because pasted code inside
+      // existing_context broke escaping (backticks/quotes/newlines).
+      // The model WAS trying to say "ready" here, so don't show this raw
+      // JSON to the user as if it were a question. Build a safe fallback
+      // context directly from the conversation history instead — same
+      // approach forceExtractContext already uses, doesn't depend on the
+      // model's JSON being well-formed.
+      return {
+        done:    true,
+        context: buildFallbackContext(updatedHistory),
+        history: updatedHistory,
+        usage:   response.usage,
+      };
+    }
   }
 
   // Still interviewing — strip any partial JSON from the question
   const cleanReply  = cleaned.replace(/\{[\s\S]*\}/, "").trim();
   const nextHistory = [...updatedHistory, { role: "assistant", content: cleaned }];
+
+  // Safety net: if stripping left nothing usable, this was almost certainly
+  // JSON-shaped content that didn't match our "ready" detector for some
+  // reason — never show raw/empty content as a question.
+  const safeQuestion = cleanReply || "Got it — could you tell me a bit more about what you're trying to do?";
+
   return {
     done:     false,
-    question: cleanReply || cleaned,
+    question: safeQuestion,
     history:  nextHistory,
     usage:    response.usage,
+  };
+};
+
+/**
+ * buildFallbackContext — used when the interviewer's JSON response fails to
+ * parse. Doesn't depend on the model's output at all — reconstructs a usable
+ * structured_context directly from what the user actually typed across the
+ * conversation, verbatim. Always succeeds, never throws.
+ */
+const buildFallbackContext = (history) => {
+  const userMessages = history
+    .filter(m => m.role === "user")
+    .map(m => m.content)
+    .join("\n\n");
+  const lastUser = [...history].reverse().find(m => m.role === "user");
+
+  return {
+    goal:             lastUser?.content?.slice(0, 200) ?? "complete the task",
+    existing_context: userMessages,
+    already_tried:    null,
+    expected_output:  null,
+    constraints:      null,
+    domain:           null,
+    raw_intent:       history[0]?.content ?? "",
+    complexity:       "medium",
   };
 };
 

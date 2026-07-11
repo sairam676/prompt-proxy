@@ -9,27 +9,43 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
  * The Sufficiency Gate decides whether we're allowed to proceed to diagnosis.
  */
 const EXTRACTOR_PROMPT = `
-You are a deep problem analyst. Given the user's full context, generate 2-4 competing
-hypotheses for what is actually causing the issue. Do NOT commit to a single answer yet.
+You are a deep problem analyst. Given the user's full context, first determine how many
+DISTINCT, INDEPENDENT issues are actually present — not different theories about one bug,
+but genuinely separate problems (e.g. "checkout 500s" AND "unrelated memory leak in the
+image resizer" would be 2 distinct issues; "checkout 500s, might be a race condition or
+might be a cache problem" is 1 issue with 2 competing theories about its cause).
+
+Most reports describe exactly ONE issue. Only split into multiple issues when the user's
+context clearly describes genuinely unrelated symptoms/areas of the codebase. Do not
+manufacture extra issues to seem thorough.
+
+For EACH distinct issue, generate 2-4 competing hypotheses for what is causing THAT issue.
+Hypotheses only compete with other hypotheses that share the same issue_id — a hypothesis
+about issue_2 is never "competing" with a hypothesis about issue_1.
 
 CRITICAL: The user has already provided their context. Do NOT say anything is missing.
 Work with what you have. If the context is rich — use it fully.
 
 For each hypothesis:
-- State the theory precisely.
-- Score confidence 0-100 based on how well the evidence supports it.
-- List concrete evidence FOR it (specific to what the user shared).
-- List concrete evidence AGAINST it, or what would need to be true to rule it out.
+- issue_id: which distinct issue this theory belongs to (e.g. "issue_1", "issue_2")
+- theory: specific, falsifiable theory of the cause
+- confidence: 0-100, scored against ONLY the other hypotheses sharing its issue_id
+- evidence_for: specific evidence from the user's context
+- evidence_against: what's missing or what would rule this out
 
-Scores should genuinely compete — don't pad every hypothesis to the same confidence.
-If the evidence overwhelmingly points to one cause, say so with a high score (85+)
-and give the others low scores (under 40). If it's genuinely ambiguous, keep scores close.
+Scores should genuinely compete within each issue group — don't pad every hypothesis to
+the same confidence. If evidence overwhelmingly points to one cause, score it 85+ and
+give competitors under 40. If genuinely ambiguous, keep scores close.
 
 Output ONLY this JSON:
 {
+  "issues": [
+    { "issue_id": "issue_1", "summary": "one-line description of this distinct issue" }
+  ],
   "hypotheses": [
     {
       "id": "h1",
+      "issue_id": "issue_1",
       "theory": "specific, falsifiable theory of the cause",
       "confidence": 0,
       "evidence_for": "specific evidence from the user's context",
@@ -80,21 +96,38 @@ export const extractAndAnalyze = async (userContext, onStep) => {
  * as the confirmed diagnosis, not a guess.
  */
 const SURGICAL_PROMPT_BUILDER = `
-You write a single surgical prompt for an expert LLM. The root cause has ALREADY
+You write a single surgical prompt for an expert LLM. The root cause(s) have ALREADY
 been diagnosed — you are not investigating, you are briefing an expert on exactly
 what to fix.
+
+You will be given an array of confirmed diagnoses — one per distinct issue. This could
+be a single diagnosis (most common) or several, if the user's report described multiple
+independent bugs.
+
+CRITICAL:
+- If there is ONE diagnosis: instruct the expert to provide ONE concrete, complete fix —
+  not a list of alternative approaches. If multiple libraries/tools could work, tell them
+  to pick the most standard/common one and implement THAT, fully.
+- If there are MULTIPLE diagnoses (multiple distinct issues): instruct the expert to
+  provide ONE fix PER issue — treat each as its own complete fix, clearly separated and
+  labeled by which issue it addresses. Do NOT let the expert merge them into one solution,
+  and do NOT let them present the issues as alternatives to each other — they are
+  independent problems that each need solving.
 
 The prompt must include ALL the user's actual content — their resume, code, JD,
 error — everything verbatim. The expert LLM only sees this prompt. Make it complete.
 
 Output ONLY this JSON:
 {
-  "surgical_prompt": "complete prompt for the expert LLM, includes confirmed root cause and all user context verbatim"
+  "surgical_prompt": "complete prompt for the expert LLM, includes all confirmed diagnoses (labeled by issue), all user context verbatim, and the fix-count instruction above"
 }
 `.trim();
 
-export const buildSurgicalPrompt = async (diagnosis, userContext, onStep) => {
+export const buildSurgicalPrompt = async (diagnoses, userContext, onStep) => {
   onStep({ type: "status", message: "Building surgical prompt from confirmed diagnosis..." });
+
+  // Accept either a single diagnosis object (legacy/common case) or an array
+  const diagnosisList = Array.isArray(diagnoses) ? diagnoses : [diagnoses];
 
   const response = await groq.chat.completions.create({
     model:    "llama-3.3-70b-versatile",
@@ -103,7 +136,8 @@ export const buildSurgicalPrompt = async (diagnosis, userContext, onStep) => {
       {
         role:    "user",
         content: JSON.stringify({
-          confirmed_diagnosis: diagnosis,
+          confirmed_diagnoses: diagnosisList,
+          issue_count:         diagnosisList.length,
           user_context:        formatContext(userContext),
         }),
       },

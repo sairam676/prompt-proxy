@@ -54,11 +54,25 @@ router.post("/start", async (req, res) => {
 router.post("/reply", async (req, res) => {
   try {
     const { sessionId, message, done: userDone } = req.body;
-    if (!sessionId || !message?.trim())
-      return res.status(400).json({ error: "sessionId and message are required" });
+    if (!sessionId || (!message?.trim() && !userDone))
+      return res.status(400).json({ error: "sessionId is required, and message unless done:true" });
 
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    // ── Force-proceed: user hit "that's all I have" WHILE mid tie-break loop.
+    // Don't treat an empty/missing message as a tie-break answer — skip
+    // straight to forcing the pipeline through with the current top
+    // hypothesis per issue (handled by runner.js's __force__ branch).
+    if (userDone && session.awaitingTieBreak) {
+      session.status                = "complete";
+      session.awaitingTieBreak      = false;
+      session.tieBreakQuestion      = null;
+      session.pendingTieBreakAnswer = "__force__";
+      await saveSession(sessionId, session);
+
+      return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
+    }
 
     // ── Tie-break answer: the interview already finished once, the
     // Sufficiency Gate blocked mid-pipeline and asked a targeted question.

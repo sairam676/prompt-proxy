@@ -108,6 +108,7 @@ export default function App() {
       if (data.type === "needs_info") {
         addMsg("bot", data.message);
         setPhase("interviewing");
+        setSteps([]);
         es.close();
         return;
       }
@@ -321,11 +322,11 @@ function Tag({ label, value, color }) {
 // ── Final result card ──────────────────────────────────────────────────────────
 function ResultCard({ result }) {
   const {
-    interpretation, diagnosis, keyInsight, severity,
+    interpretation, diagnoses, keyInsight, severity,
     tokensSaved, surgicalPrompt, rawLLMResponse,
     whatToVerify, potentialRisks, verification,
   } = result;
-  const rootCause = diagnosis?.theory ?? result.rootCause; // fallback for older result shape
+  const diagnosisList = diagnoses ?? (result.diagnosis ? [result.diagnosis] : []); // fallback for older result shape
 
   const [tab, setTab]       = useState("action");
   const [copied, setCopied] = useState(false);
@@ -367,11 +368,19 @@ function ResultCard({ result }) {
         </div>
       </div>
 
-      <div style={R.rootCause}>
-        <span style={R.rootLabel}>ROOT CAUSE</span>
-        <p style={R.rootText}>{rootCause}</p>
-        {keyInsight && <p style={R.insight}>💡 {keyInsight}</p>}
-      </div>
+      {diagnosisList.map((d, i) => (
+        <div key={i} style={R.rootCause}>
+          <span style={R.rootLabel}>
+            {diagnosisList.length > 1 ? `ROOT CAUSE — ISSUE ${i + 1}` : "ROOT CAUSE"}
+          </span>
+          <p style={R.rootText}>{d.theory}</p>
+        </div>
+      ))}
+      {keyInsight && (
+        <div style={{ padding: "0 16px 10px" }}>
+          <p style={R.insight}>💡 {keyInsight}</p>
+        </div>
+      )}
 
       {interpretation?.primary_action && (
         <div style={R.primaryAction}>
@@ -454,9 +463,41 @@ function DynamicSection({ section }) {
   if (!section?.content) return null;
   const typeIcons = { code:"💻", list:"📋", steps:"📝", warning:"⚠", tip:"💡", text:"•" };
   const icon = typeIcons[section.type] ?? "•";
+
+  const badgeStyle = {
+    verified:   { background: "#d1fae5", color: "#065f46" },
+    unverified: { background: "#fef3c7", color: "#92400e" },
+    rejected:   { background: "#fee2e2", color: "#991b1b" },
+  }[section.verification_status];
+
   return (
     <div style={R.actionBlock}>
-      <span style={R.actionLabel}>{icon} {section.title}</span>
+      <span style={R.actionLabel}>
+        {icon} {section.title}
+        {section.issue_id && (
+          <span style={{ marginLeft: 8, fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>
+            ({section.issue_id.replace("_", " ")})
+          </span>
+        )}
+        {section.verification_status && badgeStyle && (
+          <span style={{
+            marginLeft: 8, fontSize: 10, fontWeight: 600, padding: "2px 6px",
+            borderRadius: 4, ...badgeStyle,
+          }}>
+            {section.verification_status === "verified" ? "✅ verified"
+              : section.verification_status === "rejected" ? "❌ rejected"
+              : "⚠ unverified"}
+          </span>
+        )}
+      </span>
+      {section.verification_status === "rejected" && section.verification_note && (
+        <div style={{
+          fontSize: 12, color: "#991b1b", background: "#fef2f2",
+          border: "1px solid #fecaca", borderRadius: 6, padding: "6px 10px", marginTop: 4,
+        }}>
+          ⚠ Verifier flagged this: {section.verification_note}
+        </div>
+      )}
       {section.type === "code" ? (
         <pre style={{ ...R.pre, marginTop:6, borderRadius:6 }}>{section.content}</pre>
       ) : section.type === "list" || section.type === "steps" ? (
