@@ -1,147 +1,194 @@
 # PromptProxy
 
-We extract. We brief. Your LLM solves it right.
+> AI middleware that extracts context, isolates root cause via competing hypotheses, sends ONE surgical prompt to your LLM, and verifies the fix before you see it.
 
-PromptProxy is a middleware layer that sits between you and your LLM. Instead of
-you going back and forth with your LLM guessing at what's wrong, PromptProxy
-interviews you, forms and tests competing hypotheses about the actual cause,
-verifies the fix your LLM proposes, and hands you a clean action plan — one
-LLM call, not five.
+**Live → [prompt-proxy-mocha.vercel.app](https://prompt-proxy-mocha.vercel.app)**
+**GitHub → [github.com/sairam676/prompt-proxy](https://github.com/sairam676/prompt-proxy)**
 
-## Why
+---
 
-Talking directly to a big LLM about a real bug usually means: you under-describe
-the problem, the LLM guesses, guesses wrong, you clarify, it guesses again,
-and three round-trips later you have a fix that may or may not actually be
-correct — with no one checking it before you paste it into your codebase.
+## The problem it solves
 
-PromptProxy's job is to be the layer that:
-- Extracts full context before ever calling the expensive LLM
-- Refuses to guess when it's genuinely ambiguous — asks ONE targeted question instead
-- Sends exactly one surgical, complete prompt to your LLM
-- Verifies the fix (syntax/type/API checks, plus a real npm registry lookup for
-  fabricated packages) before showing it to you
-- Strips padding — one fix per diagnosed issue, not a menu of five options
+When you paste a vague problem into Claude or GPT, the LLM guesses at intent, hallucinates context it doesn't have, and gives you a fix that looks right but isn't. You spend hours debugging the LLM's answer instead of your actual bug.
 
-## Architecture
+PromptProxy sits between you and your LLM:
+- We extract everything the LLM needs before it sees your problem
+- We generate competing hypotheses and only proceed when one clearly wins
+- Your LLM gets called exactly once with a complete, grounded prompt
+- We verify the fix before you see it
+
+---
+
+## Pipeline
 
 ```
-User message
-    │
-    ▼
-Interviewer (Groq, llama-3.3-70b)         middleware/interviewer.js
-    │  extracts structured_context from the conversation
-    ▼
-┌─────────────────────────────────────────────────────────┐
-│  Debugging task?                                          │
-│  ── no  → simple path: one prompt, one LLM call, done      │
-│  ── yes → full pipeline below                              │
-└─────────────────────────────────────────────────────────┘
-    │
-    ▼
-Hypothesis Engine (Groq)                   pipeline/extractor.js
-    │  generates 2-4 competing hypotheses PER distinct issue
-    │  (a report can describe multiple independent bugs)
-    ▼
-Sufficiency Gate                           pipeline/sufficiencyGate.js
-    │  top hypothesis > 80% confidence AND runner-up < 40% → proceed
-    │  otherwise → ask a targeted tie-break question, scoped to
-    │  only the ambiguous issue (resolved issues aren't re-asked)
-    │
-    │  user can force through at any point ("that's all I have") —
-    │  takes the current top hypothesis per issue as-is
-    ▼
-Surgical Prompt Builder (Groq)             pipeline/extractor.js
-    │  one complete prompt per diagnosis, explicit "no menu of
-    │  options" instruction, one fix per issue if multiple
-    ▼
-Your LLM (Claude / OpenAI / Groq — your key, your credits)
-    │  exactly ONE call
-    ▼
-Fix Verifier                               pipeline/fixVerifier.js
-    │  LLM check: syntax, types, standard-library API correctness
-    │  DETERMINISTIC check: imported npm packages verified against
-    │  the real registry — not another LLM's guess
-    ▼
-Interpreter (Groq)                         pipeline/interpreter.js
-    │  builds the final action plan, tags each section with its
-    │  issue + verification status, enforces one-fix-per-issue
-    ▼
-Result shown to user
+Your problem (paste anything — code, error, question, task)
+        ↓
+Interview (Groq/Llama — free)
+  Asks targeted questions to extract full context verbatim
+  Stops when it has enough — no fixed question limit
+        ↓
+Route decision:
+  Debugging/code task? → Full hypothesis engine
+  Simple task?         → Straight to your LLM
+        ↓
+[DEBUGGING PATH]
+Hypothesis Engine (Groq — free)
+  Generates 2-4 competing theories with confidence scores 0-100
+  Evidence for/against each, per distinct issue
+        ↓
+Sufficiency Gate (deterministic — no LLM)
+  Top hypothesis > 75% AND runner-up < 45%? → Proceed
+  Too close?                                → Ask one targeted tie-break question
+  User answers → re-score only the two competing hypotheses (8B model, cheap)
+  Loop until gate passes
+        ↓
+Surgical Prompt Builder (Groq — free)
+  Built from confirmed diagnosis only — not a guess
+  Includes all user context verbatim
+        ↓
+[BOTH PATHS JOIN HERE]
+Your LLM — called ONCE (your key, your credits)
+  Claude / OpenAI / Groq
+        ↓
+Fix Verifier (Groq — free)
+  Syntax, types, API correctness
+  Deterministic npm registry check — actual HTTP lookup, not LLM guessing
+  v2 (flag): semantics, concurrency, race conditions
+        ↓
+Action Plan
+  Root cause + mechanism
+  Fix with full code (verbatim from LLM)
+  Verification status per section (verified/unverified/rejected)
+  What to test + what to watch for
+  What the LLM missed
 ```
 
-## Setup
+---
+
+## What we use vs what you pay for
+
+| Step | Who runs it | Cost |
+|------|------------|------|
+| Interview | Our Groq (Llama 3.3 70B) | Free |
+| Hypothesis engine | Our Groq (Llama 3.3 70B) | Free |
+| Tie-break rescore | Our Groq (Llama 3.1 8B) | Free |
+| Surgical prompt builder | Our Groq (Llama 3.3 70B) | Free |
+| **Final LLM call** | **Your key (Claude/GPT/Groq)** | **Your credits** |
+| Fix verifier | Our Groq (Llama 3.1 8B) | Free |
+| Interpreter | Our Groq (Llama 3.3 70B) | Free |
+
+You pay for exactly one LLM call — the one that actually solves your problem.
+
+---
+
+## Token savings
+
+Without PromptProxy, a typical debugging session:
+- 5 back-and-forth turns
+- Each turn: vague user message + repeated context + LLM response
+- ~3x token waste per turn from repeated/vague context
+
+With PromptProxy:
+- 1 surgical call with complete, grounded context
+- No repeated context, no vague prompts, no hallucination-fixing turns
+
+---
+
+## Stack
+
+| Layer | Tech |
+|---|---|
+| Interview + pipeline | Groq (Llama 3.3 70B / 3.1 8B instant) |
+| User LLM | Claude (Anthropic) / OpenAI / Groq |
+| Session cache | Upstash Redis |
+| Backend | Node.js, Express, SSE streaming |
+| Frontend | React, Vite |
+| Deploy | Render (backend) + Vercel (frontend) |
+
+---
+
+## Run locally
 
 ```bash
-cd frontend && npm install
-cd .. && npm install
+# Clone
+git clone https://github.com/sairam676/prompt-proxy.git
+cd prompt-proxy
+
+# Install
+npm install
+
+# Environment
+cp .env.example .env
+# Fill in: GROQ_API_KEY, REDIS_URL
+
+# Start backend
+npm run dev
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
 ```
 
-Environment variables (`.env`):
-```
-GROQ_API_KEY=          # required — powers the interviewer/hypothesis/verifier/interpreter
-REDIS_URL=              # session storage
-TEST_LLM_PROVIDER=      # optional, for local testing without going through the /key screen
-TEST_LLM_KEY=
-VERIFIER_V2=false        # flip to true to enable semantic/concurrency checks (heavier)
+Open `http://localhost:5173`
+
+---
+
+## Environment variables
+
+```env
+GROQ_API_KEY=gsk_...          # from console.groq.com (free)
+REDIS_URL=rediss://...         # from upstash.com (free)
+PORT=3000
+NODE_ENV=development
+VERIFIER_V2=false              # set true to enable concurrency/semantics checks
 ```
 
-Run:
-```bash
-node src/server.js       # backend
-cd frontend && npm run dev   # frontend
-```
+---
 
-## Project structure
+## File structure
 
 ```
 src/
-├── middleware/
-│   ├── interviewer.js       interview loop — extracts structured_context
-│   ├── correctnessLayer.js  pre-pipeline check for missing critical facts
-│   ├── promptBuilder.js
-│   ├── taskClassifier.js
-│   └── tokenEstimator.js
 ├── pipeline/
-│   ├── extractor.js         hypothesis engine + surgical prompt builder
-│   ├── sufficiencyGate.js   confidence gate, multi-issue grouping, force-proceed
-│   ├── fixVerifier.js       LLM checks + deterministic npm registry check
-│   ├── interpreter.js       final action plan, relevance constraint, verification tagging
-│   └── runner.js            orchestrates the full pipeline
+│   ├── extractor.js          # Hypothesis engine + surgical prompt builder + rescore
+│   ├── sufficiencyGate.js    # Deterministic gate (75/45 threshold) + tie-break
+│   ├── fixVerifier.js        # v1 checks + npm registry lookup
+│   ├── interpreter.js        # Relevance-constrained action plan
+│   └── runner.js             # Orchestrator — simple vs complex path
+├── middleware/
+│   └── interviewer.js        # LLM-driven context extraction
 ├── routes/
-│   ├── chat.js               older single-shot prompt-building flow
-│   └── pipeline.js           SSE pipeline flow (interview → run → tie-break loop)
-├── services/
-│   └── sessionStore.js       Redis-backed session state
-└── cache/redis.js
+│   └── pipeline.js           # SSE endpoint + tie-break session state
+├── cache/redis.js
+├── services/sessionStore.js
+└── server.js
 
-frontend/src/App.jsx           chat UI + live pipeline step feed + result card
+frontend/src/
+└── App.jsx                   # Live step feed, hypothesis display, result card
 ```
 
-## Known issues / in progress
+---
 
-- **Interviewer JSON leak**: when the interviewer's raw JSON response contains
-  unescaped characters (common with pasted code blocks with backticks/quotes),
-  `JSON.parse` fails silently and the raw JSON can leak into the chat as a
-  message instead of being parsed. Fix in progress in `interviewer.js`.
-- **Task-type gating** (`isDebuggingTask` in `runner.js`) is a regex heuristic,
-  not a real classifier — `taskClassifier.js` exists in the repo but isn't
-  wired into the pipeline route yet. Works for obvious cases, may misclassify
-  edge cases.
-- **`chat.js` and `pipeline.js` are largely duplicate interview flows.**
-  `chat.js` is the older single-shot flow; `pipeline.js` is the current
-  SSE-based one with the full hypothesis/gate/verify pipeline. Worth
-  consolidating once the pipeline flow is stable.
-- **Verifier LLM checks (syntax/types/API) are opinion-based**, not
-  deterministic — only the npm package existence check is a real lookup.
-  Worth extending the same pattern (real checks over LLM guesses) to syntax
-  validation (e.g. actually running a parser) where feasible.
+## Current state
 
-## Design principle
+**Working well:**
+- Debugging, security vulnerabilities, performance bugs, system design
+- Multi-issue detection (reports describing 2 unrelated bugs handled separately)
+- Fix verifier catches bad fixes (wrong API usage, fake npm packages)
+- Tie-break loop with hypothesis memory (re-scores only competing pair, not full reset)
+- Simple task bypass — writing/learning/analysis skips hypothesis engine
 
-Prompts are not the last line of defense. Anything that can be checked
-deterministically (does this package exist, is this JSON valid, is this
-confidence score above a threshold) should be — LLM judgment is reserved for
-things that genuinely require reasoning (does this fix address the diagnosed
-cause, is this the standard approach). This is an ongoing effort, not fully
-applied everywhere yet — see Known issues above.
+**Not built yet:**
+- Auth + encrypted API key storage (user pastes key each session currently)
+- File upload (resume, JD, code files — user pastes manually now)
+- Regression test suite
+- Semantic/concurrency verifier (v2, behind flag)
+
+---
+
+## Built by
+
+**Sairam Devarasetty** — NIT Patna CS 2027
+[linkedin.com/in/sairamdevarasetty676](https://linkedin.com/in/sairamdevarasetty676) · [github.com/sairam676](https://github.com/sairam676)
