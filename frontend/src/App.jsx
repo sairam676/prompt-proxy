@@ -37,7 +37,16 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       setSessionId(data.sessionId);
-      if (data.status === "complete") {
+
+      if (data.status === "complete_syntax_only") {
+        // Deterministic syntax check caught the bug directly — no LLM
+        // round-trip needed. Show it and stay idle, ready for a new message.
+        const issueText = data.syntaxIssues
+          .map(issue => `⚠ ${issue.description}`)
+          .join("\n");
+        addMsg("bot", `${data.message}\n\n${issueText}`);
+        setPhase("idle");
+      } else if (data.status === "complete") {
         setPhase("key");
       } else {
         addMsg("bot", data.question);

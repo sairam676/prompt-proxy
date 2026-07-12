@@ -15,16 +15,34 @@ import { getSession, saveSession, createSession } from "../services/sessionStore
 import { runInterviewTurn, forceExtractContext } from "../middleware/interviewer.js";
 import { runPipeline } from "../pipeline/runner.js";
 import { v4 as uuidv4 } from "uuid";
+import { verifySyntax } from "../pipeline/syntaxVerifier.js";
 
 const router = express.Router();
+
+
 
 // ── POST /api/pipeline/start ──────────────────────────────────────────────────
 // Start interview — same as before
 router.post("/start", async (req, res) => {
+  
   try {
     const { message } = req.body;
     if (!message?.trim()) return res.status(400).json({ error: "message is required" });
-
+      
+     // Deterministic pre-check: if the pasted message contains a code block
+    // with a syntax error, that IS the bug — skip the interview and LLM
+    // round-trip entirely, just tell the user directly.
+    const syntaxCheck = verifySyntax(message);
+    if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
+      const sessionId = uuidv4();
+      return res.json({
+        sessionId,
+        status: "complete_syntax_only",
+        syntaxIssues: syntaxCheck.issues,
+        message: "Found a syntax error directly — no need to call your LLM for this one.",
+      });
+    }
+    
     const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
 
