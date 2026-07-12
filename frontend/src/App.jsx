@@ -380,6 +380,51 @@ function ResultCard({ result }) {
           <p style={R.rootText}>{d.theory}</p>
         </div>
       ))}
+
+      {interpretation?.confidence != null && (
+  <div style={{ padding: "10px 16px", borderBottom: "1px solid #f3f4f6" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: "#6b7280" }}>CONFIDENCE</span>
+      <span style={{
+        fontSize: 13, fontWeight: 600,
+        color: interpretation.confidence >= 75 ? "#059669" : interpretation.confidence >= 50 ? "#d97706" : "#dc2626",
+      }}>
+        {interpretation.confidence}%
+      </span>
+    </div>
+    {interpretation.evidence?.length > 0 && (
+      <div style={{ marginBottom: 6 }}>
+        {interpretation.evidence.map((e, i) => (
+          <p key={i} style={{ fontSize: 12, color: "#065f46", margin: "2px 0" }}>✓ {e}</p>
+        ))}
+      </div>
+    )}
+    {interpretation.assumptions?.length > 0 && (
+      <div style={{ marginBottom: 6 }}>
+        {interpretation.assumptions.map((a, i) => (
+          <p key={i} style={{ fontSize: 12, color: "#92400e", margin: "2px 0" }}>? {a}</p>
+        ))}
+      </div>
+    )}
+    {interpretation.alternative_hypotheses?.length > 0 && (
+      <div>
+        <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 600 }}>ALTERNATIVES CONSIDERED</span>
+        {interpretation.alternative_hypotheses.map((h, i) => (
+          <p key={i} style={{ fontSize: 12, color: "#6b7280", margin: "2px 0" }}>
+            {h.theory} ({h.confidence}%)
+          </p>
+        ))}
+      </div>
+    )}
+    {interpretation.evidence_audit_warning && (
+      <p style={{ fontSize: 11, color: "#dc2626", marginTop: 6, fontStyle: "italic" }}>
+        ⚠ {interpretation.evidence_audit_warning}
+      </p>
+    )}
+  </div>
+)}
+
+
       {keyInsight && (
         <div style={{ padding: "0 16px 10px" }}>
           <p style={R.insight}>💡 {keyInsight}</p>
