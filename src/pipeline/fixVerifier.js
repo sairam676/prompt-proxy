@@ -15,6 +15,7 @@
  * npm package actually exist. An HTTP lookup against the real registry can't
  * be second-guessed the way a model's stylistic judgment can.
  */
+import { verifySyntax } from "./syntaxVerifier.js";
 
 const extractNpmImports = (code) => {
   const names = new Set();
@@ -57,23 +58,23 @@ const checkPackagesExist = async (packageNames) => {
 
 export const verifyFix = async (llmResponse, userContext, onStep) => {
   const packageNames = extractNpmImports(llmResponse);
+  const syntaxResult = verifySyntax(llmResponse);
 
-  if (!packageNames.length) {
-    return { status: "unverified", issues: [], notes: "No package imports to verify." };
-  }
+  onStep({ type: "status", message: "Checking code syntax and package imports..." });
 
-  onStep({ type: "status", message: `Checking ${packageNames.length} package name(s) against npm registry...` });
-  const issues = await checkPackagesExist(packageNames);
-  const status = issues.length ? "rejected" : "verified";
+  const npmIssues = packageNames.length ? await checkPackagesExist(packageNames) : [];
+  const allIssues = [...npmIssues, ...syntaxResult.issues];
+
+  const status = allIssues.length ? "rejected" : "verified";
 
   const verification = {
     status,
-    issues,
-    notes: issues.length
-      ? "One or more imported packages don't exist on npm."
-      : "All imported packages exist on npm.",
+    issues: allIssues,
+    notes: allIssues.length
+      ? "One or more issues found — see details."
+      : "No syntax errors and all imported packages exist on npm.",
   };
 
-  onStep({ type: "verification_done", message: `Package check: ${status}`, data: verification });
+  onStep({ type: "verification_done", message: `Fix check: ${status}`, data: verification });
   return verification;
 };
