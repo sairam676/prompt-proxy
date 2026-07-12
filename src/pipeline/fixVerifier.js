@@ -1,49 +1,34 @@
-import Groq from "groq-sdk";
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
 /**
  * fixVerifier.js
  *
- * Runs on Groq before the fix is shown to the user. Checks the LLM's fix
- * for correctness issues that would otherwise waste the user's time.
+ * OLD DESIGN: a small Groq model gave a second opinion on the fix's
+ * correctness. Testing showed this unreliable in both directions — it
+ * missed a fabricated npm package, then separately invented a fake
+ * objection to correct nullish-coalescing code. A weak model's "verdict"
+ * added false confidence, not correctness — the real LLM that wrote the fix
+ * is better positioned to self-critique it than a smaller model second-
+ * guessing from the outside.
  *
- * v1 (default): syntax, types, API/library correctness (LLM judgment).
- * v2 (flagged): semantic preservation, concurrency/race conditions,
- *               adversarial counterexamples.
- *
- * DETERMINISTIC CHECK (always on, not LLM-based): package names imported in
- * code sections get checked against the real npm registry. A small model
- * guessing "does this package exist" just pattern-matches plausible-sounding
- * names — it can't actually know. An HTTP lookup can. This is exactly the
- * kind of check that shouldn't be delegated to another LLM's opinion.
+ * NEW DESIGN: self-critique is now part of the single diagnostic call to
+ * the user's real LLM (see extractor.js's buildDiagnosticPrompt). This file
+ * keeps only the one check that's a FACT, not an opinion: does an imported
+ * npm package actually exist. An HTTP lookup against the real registry can't
+ * be second-guessed the way a model's stylistic judgment can.
  */
 
-const CHECKS = {
-  syntax:      true,
-  types:       true,
-  api:         true,
-  semantics:   process.env.VERIFIER_V2 === "true",
-  concurrency: process.env.VERIFIER_V2 === "true",
-};
-
-// ── Deterministic npm package existence check ──────────────────────────────
 const extractNpmImports = (code) => {
   const names = new Set();
 
-  // ES import: import x from 'pkg', import { x } from 'pkg/sub'
   for (const m of code.matchAll(/\bimport\s+(?:[\w*{}\s,]+\s+from\s+)?['"]([^'"]+)['"]/g)) {
     names.add(m[1]);
   }
-  // CommonJS: require('pkg')
   for (const m of code.matchAll(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/g)) {
     names.add(m[1]);
   }
 
   return [...names]
-    .filter(n => !n.startsWith(".") && !n.startsWith("/")) // skip relative/local imports
+    .filter(n => !n.startsWith(".") && !n.startsWith("/"))
     .map(n => {
-      // Reduce to the installable package name: scoped pkgs keep @scope/name,
-      // subpaths (e.g. "lodash/get") reduce to the package root ("lodash").
       const parts = n.split("/");
       return n.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
     });
@@ -64,85 +49,31 @@ const checkPackagesExist = async (packageNames) => {
         });
       }
     } catch (_) {
-      // Network failure during check — don't fail the fix over our own
-      // check being unreachable, just skip it silently.
+      // Our own check being unreachable shouldn't fail the fix — skip silently.
     }
   }));
   return issues;
 };
 
-const buildVerifierPrompt = (checks) => `
-You are a strict code verifier. Check the proposed fix ONLY for the categories
-listed below — do not comment on style, do not suggest improvements outside scope.
-Do NOT comment on whether imported packages exist — that is checked separately
-by an actual registry lookup, not by you guessing.
-
-Enabled checks:
-${checks.syntax      ? "- Syntax correctness (does this actually parse/compile in its language)" : ""}
-${checks.types        ? "- Type correctness (type mismatches, wrong signatures, incompatible args)" : ""}
-${checks.api           ? "- API correctness OF THE STANDARD LIBRARY / WELL-KNOWN APIS ONLY (e.g. WeakMap requiring object keys, not strings). Do not judge whether third-party packages exist." : ""}
-${checks.semantics    ? "- Semantic preservation (does the fix change behavior beyond what was intended)" : ""}
-${checks.concurrency  ? "- Concurrency/race conditions (does the fix introduce or fail to address race conditions)" : ""}
-
-For each issue found, be specific: quote the exact problematic construct and explain why it's wrong.
-If you find zero issues in the enabled categories, say so explicitly — do not invent issues to seem thorough.
-Do not flag minor style preferences as issues — only flag things that are actually incorrect.
-
-Output ONLY this JSON:
-{
-  "status": "verified|unverified|rejected",
-  "issues": [
-    { "category": "syntax|types|api|semantics|concurrency", "description": "specific issue found", "severity": "blocking|minor" }
-  ],
-  "notes": "brief explanation of the verdict"
-}
-
-status meanings:
-- "verified": checked, no blocking issues found in enabled categories.
-- "unverified": could not fully confirm correctness (e.g. insufficient context to check), but no confirmed issue either.
-- "rejected": found at least one blocking issue.
-`.trim();
-
 export const verifyFix = async (llmResponse, userContext, onStep) => {
-  onStep({ type: "status", message: "Verifying fix before showing it to you..." });
+  const packageNames = extractNpmImports(llmResponse);
 
-  const [llmVerification, packageNames] = await Promise.all([
-    groq.chat.completions.create({
-      model:    "llama-3.1-8b-instant",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: buildVerifierPrompt(CHECKS) },
-        {
-          role:    "user",
-          content: JSON.stringify({
-            proposed_fix:   llmResponse,
-            original_context: userContext.existing_context ?? userContext.raw_intent ?? "",
-          }),
-        },
-      ],
-    }).then(r => JSON.parse(r.choices[0].message.content.trim())),
-    Promise.resolve(extractNpmImports(llmResponse)),
-  ]);
+  if (!packageNames.length) {
+    return { status: "unverified", issues: [], notes: "No package imports to verify." };
+  }
 
   onStep({ type: "status", message: `Checking ${packageNames.length} package name(s) against npm registry...` });
-  const packageIssues = packageNames.length ? await checkPackagesExist(packageNames) : [];
-
-  // Merge: deterministic package issues are never overridden by the LLM's
-  // opinion. A fabricated package is always blocking, full stop.
-  const allIssues = [...llmVerification.issues, ...packageIssues];
-  const hasBlocking = allIssues.some(i => i.severity === "blocking");
+  const issues = await checkPackagesExist(packageNames);
+  const status = issues.length ? "rejected" : "verified";
 
   const verification = {
-    status: hasBlocking ? "rejected" : llmVerification.status,
-    issues: allIssues,
-    notes:  llmVerification.notes,
+    status,
+    issues,
+    notes: issues.length
+      ? "One or more imported packages don't exist on npm."
+      : "All imported packages exist on npm.",
   };
 
-  onStep({
-    type:    "verification_done",
-    message: `Fix ${verification.status}`,
-    data:    verification,
-  });
-
+  onStep({ type: "verification_done", message: `Package check: ${status}`, data: verification });
   return verification;
 };

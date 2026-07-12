@@ -12,27 +12,24 @@ Be comprehensive. Do not artificially shorten. Every important piece of informat
 from the LLM response must surface in your output.
 
 RELEVANCE CONSTRAINT (strict):
-You will be given the confirmed diagnoses — this may be ONE diagnosis or an array of
-several, if the user's report described multiple distinct, independent issues.
+The LLM response IS the diagnosis, fix, and self-critique in one — it was asked to
+diagnose with cited evidence, fix, and self-critique itself in a single response.
+Extract its stated diagnosis (and self-critique, if present) into their own
+output_sections so the user can see the reasoning, not just the fix.
 
-Every output_section must trace directly to one of the confirmed diagnoses, the key
-insight, or a specifically confirmed risk. Do NOT include generic infrastructure
-suggestions (load balancing, database connection pooling, Kafka, Kubernetes tuning,
-caching layers, etc.) unless the user's own context specifically mentions that system
-already being in use.
+Do NOT include generic infrastructure suggestions (load balancing, database
+connection pooling, Kafka, Kubernetes tuning, caching layers, etc.) unless the
+user's own context specifically mentions that system already being in use.
 
-TWO DIFFERENT SITUATIONS — do not confuse them:
-1. MULTIPLE ALTERNATIVE APPROACHES TO THE SAME DIAGNOSED ISSUE (e.g. "you could use
-   Redis, or Memcached, or a message queue" for ONE confirmed cause): this is padding.
-   Pick the ONE most standard/conventional approach and present ONLY that as the fix,
-   with its full code. Mention the alternatives, if at all, in one sentence inside the
-   "Optional" section.
-2. MULTIPLE GENUINELY DISTINCT DIAGNOSED ISSUES (the diagnoses array has more than one
-   entry — e.g. a race condition in checkout AND an unrelated memory leak elsewhere):
-   these are NOT alternatives to each other. Give each its own clearly labeled fix with
-   its own full code, tagged with which diagnosed issue it addresses. Do not merge them
-   into one section, and do not present them as a menu the user picks from — the user
-   needs to fix ALL of them.
+If the LLM response itself lists multiple alternative approaches to the SAME
+issue (e.g. "you could use Redis, or Memcached, or..."): pick the ONE most
+standard approach and present ONLY that as the fix, with its full code. Mention
+alternatives, if at all, in one sentence inside an "Optional" section.
+
+If the LLM diagnosed multiple genuinely distinct issues (it was told to, if the
+context described more than one): give each its own clearly labeled fix with its
+own full code, tagged with which issue it addresses — don't merge them, don't
+present them as a menu.
 
 Anything genuinely useful but not essential to any of the diagnosed issues goes in
 exactly ONE section titled "Optional" — never mixed into the main output_sections.
@@ -86,7 +83,6 @@ export const interpretResponse = async (llmResponse, analysis, userContext, veri
         role:    "user",
         content: JSON.stringify({
           task:         userContext.goal ?? userContext.raw_intent,
-          diagnoses:    analysis.diagnoses ?? [{ theory: analysis.root_cause }],
           key_insight:  analysis.key_insight,
           llm_response: llmResponse,
           verification: verification ?? { status: "unverified", issues: [], notes: "No verifier run." },

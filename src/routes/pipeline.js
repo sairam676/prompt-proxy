@@ -60,38 +60,21 @@ router.post("/reply", async (req, res) => {
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-    // ── Force-proceed: user hit "that's all I have" WHILE mid tie-break loop.
-    // Don't treat an empty/missing message as a tie-break answer — skip
-    // straight to forcing the pipeline through with the current top
-    // hypothesis per issue (handled by runner.js's __force__ branch).
-    if (userDone && session.awaitingTieBreak) {
-      session.status                = "complete";
-      session.awaitingTieBreak      = false;
-      session.tieBreakQuestion      = null;
-      session.pendingTieBreakAnswer = "__force__";
-      await saveSession(sessionId, session);
-
-      return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
-    }
-
-    // ── Tie-break answer: the interview already finished once, the
-    // Sufficiency Gate blocked mid-pipeline and asked a targeted question.
-    // Don't re-run the interviewer LLM (it already said "ready" and would
-    // get confused) — append the answer to existing_context for the final
-    // surgical prompt, and stash it as pendingTieBreakAnswer so the next
-    // SSE run re-scores ONLY the two hypotheses that were competing,
-    // instead of regenerating the whole hypothesis set from scratch.
+    // ── Clarification answer: the real LLM (not a cheap pre-filter) said it
+    // needed more info to diagnose confidently and asked a specific question.
+    // Fold the answer into existing_context and let the next SSE run treat
+    // this as a fresh, enriched call — there's no hypothesis state to
+    // rescore anymore, the whole point of the redesign is one real call.
     if (session.awaitingTieBreak) {
       const ctx = session.structuredContext ?? {};
       ctx.existing_context = ctx.existing_context
         ? `${ctx.existing_context}\n\n${message}` : message;
       ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
 
-      session.structuredContext    = ctx;
-      session.status                = "complete";
-      session.awaitingTieBreak      = false;
-      session.tieBreakQuestion      = null;
-      session.pendingTieBreakAnswer = message;
+      session.structuredContext = ctx;
+      session.status             = "complete";
+      session.awaitingTieBreak   = false;
+      session.tieBreakQuestion   = null;
       await saveSession(sessionId, session);
 
       return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
@@ -132,7 +115,7 @@ router.post("/reply", async (req, res) => {
 // SSE endpoint — streams pipeline steps live to the frontend
 router.get("/run/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
-  const provider = req.query.provider ?? process.env.TEST_LLM_PROVIDER ?? "claude";
+  const provider = req.query.provider ?? process.env.TEST_LLM_PROVIDER ?? "openai";
   const apiKey   = req.query.apiKey   ?? process.env.TEST_LLM_KEY;
 
   if (!apiKey) {
@@ -161,44 +144,23 @@ router.get("/run/:sessionId", async (req, res) => {
       return res.end();
     }
 
-    // If the last turn was a tie-break answer, resume with a targeted
-    // re-score instead of regenerating the whole hypothesis set.
-    const resume = session.pendingTieBreakAnswer
-      ? {
-          analysis:     session.analysis,
-          competingIds: session.competingIds,
-          newAnswer:    session.pendingTieBreakAnswer,
-        }
-      : null;
+    const result = await runPipeline(session.structuredContext, provider, apiKey, send);
 
-    const result = await runPipeline(session.structuredContext, provider, apiKey, send, resume);
-
-    // Clear the consumed answer regardless of outcome — it's either been
-    // folded into updated hypotheses (success) or a fresh tie-break question
-    // is being asked (blocked again), neither case should replay the old answer.
-    session.pendingTieBreakAnswer = null;
-
-    // ── Sufficiency Gate blocked — hand the tie-break question back to the
-    // frontend as a "needs_info" event (App.jsx already listens for this
-    // exact type and switches phase to "interviewing"). Persist enough state
-    // on the session (analysis + competingIds) so the NEXT answer can be
-    // re-scored against just those two hypotheses again.
-    if (result?.blocked && result.reason === "insufficient_evidence") {
+    // ── Real LLM said it needs clarification — hand the question back to
+    // the frontend as "needs_info" (App.jsx already listens for this exact
+    // type). No hypothesis state to persist anymore — the next answer just
+    // enriches the context for a fresh call.
+    if (result?.blocked && result.reason === "needs_clarification") {
       session.status           = "interviewing";
       session.awaitingTieBreak = true;
       session.tieBreakQuestion = result.tieBreakQuestion;
-      session.analysis         = result.analysis;
-      session.competingIds     = result.competingIds;
       await saveSession(sessionId, session);
 
       send({ type: "needs_info", message: result.tieBreakQuestion });
       return res.end();
     }
 
-    // Successful run — clear gate state, nothing left to resume
-    session.analysis     = null;
-    session.competingIds = null;
-    await saveSession(sessionId, session);
+    // Successful run — nothing to persist for next time
   } catch (err) {
     console.error("[/pipeline/run]", err);
     send({ type: "error", message: err.message });
