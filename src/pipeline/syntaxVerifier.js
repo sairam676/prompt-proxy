@@ -20,21 +20,28 @@ const extractCodeBlocks = (llmResponse) => {
 
 export const verifySyntax = (llmResponse) => {
   const blocks = extractCodeBlocks(llmResponse);
-  if (!blocks.length) {
-    return { checked: false, issues: [] };
-  }
+
+  // Fallback: no fenced code blocks found — the message might still BE
+  // code, just pasted raw without ``` fences. Try parsing it directly
+  // rather than silently skipping the check.
+  const candidates = blocks.length > 0 ? blocks : [llmResponse];
 
   const issues = [];
-  blocks.forEach((code, i) => {
+  candidates.forEach((code, i) => {
     try {
       parse(code, { ecmaVersion: "latest", sourceType: "module", allowReturnOutsideFunction: true });
     } catch (err) {
-      issues.push({
-        blockIndex: i,
-        category:   "syntax",
-        description: `Code block ${i + 1} has a syntax error: ${err.message}`,
-        severity:   "blocking",
-      });
+      // Only report as an issue if this looks like it was actually meant
+      // to be code — avoid flagging plain English text as a syntax error.
+      const looksLikeCode = /function\s|=>|const\s|let\s|var\s|\{|\}/.test(code);
+      if (looksLikeCode) {
+        issues.push({
+          blockIndex: i,
+          category:   "syntax",
+          description: `Code has a syntax error: ${err.message}`,
+          severity:   "blocking",
+        });
+      }
     }
   });
 
