@@ -60,19 +60,12 @@ router.post("/reply", async (req, res) => {
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-    if (session.awaitingTieBreak) {
+   if (session.awaitingTieBreak) {
   const ctx = session.structuredContext ?? {};
   ctx.existing_context = ctx.existing_context
-    ? `${ctx.existing_context}\n\n${message}` : message;
+    ? `${ctx.existing_context}\n\n[CONFIRMED BY USER]: ${message}`
+    : `[CONFIRMED BY USER]: ${message}`;
   ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
-
-  // Confirmed-facts ledger: once the user answers a clarifying question,
-  // that answer is confirmed evidence, not a re-askable assumption. Track
-  // it so a re-diagnosis treats it as settled rather than re-litigating.
-  ctx.confirmedFacts = [
-    ...(ctx.confirmedFacts ?? []),
-    { question: session.tieBreakQuestion, answer: message },
-  ];
 
   session.structuredContext = ctx;
   session.status             = "complete";

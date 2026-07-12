@@ -115,6 +115,11 @@ You are debugging a real problem. Here is the full context:
 
 ${brief}
 
+Anything in the context marked "[CONFIRMED BY USER]" is a settled fact the
+user directly confirmed — treat it as EVIDENCE, not an assumption, even if
+it answers something you would otherwise have had to assume. Do not hedge
+on a fact the user has already confirmed.
+
 Do the following, in order:
 
 1. EVIDENCE: List only what is directly observable in the given context —
