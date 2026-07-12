@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 
-const API = "http://localhost:3000/api/pipeline";
-
+const API = import.meta.env.VITE_API_URL || "http://localhost:3000/api/pipeline";
 // Temp: for testing, user pastes their key once per session
 // Will be replaced with stored encrypted key after auth is built
 
