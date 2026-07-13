@@ -68,20 +68,23 @@ export const buildBrief = async (userContext, onStep) => {
   });
 
   let result;
-  try {
-    result = JSON.parse(response.choices[0].message.content.trim());
-  } catch (_) {
-    // Groq's JSON mode occasionally breaks on pasted code containing quotes
-    // or newlines that corrupt the JSON structure. Fall back to using the
-    // user's raw context directly as the brief rather than crashing —
-    // compression is a nice-to-have, not something worth failing the whole
-    // pipeline over.
-    result = {
-      brief: formatContext(userContext),
-      distinct_issue_count: 1,
-      complexity: "medium",
-    };
+try {
+  result = JSON.parse(response.choices[0].message.content.trim());
+  // JSON.parse succeeding doesn't guarantee the shape is right — Groq's
+  // 8B model can return valid JSON that still deviates from the schema
+  // (e.g. "brief" as a nested object instead of a plain string). If that
+  // happens, a template literal downstream would silently stringify it
+  // to "[object Object]" with no error. Catch that here instead.
+  if (typeof result.brief !== "string" || !result.brief.trim()) {
+    throw new Error("brief was not a usable string");
   }
+} catch (_) {
+  result = {
+    brief: formatContext(userContext),
+    distinct_issue_count: 1,
+    complexity: "medium",
+  };
+}
 
   onStep({
     type:    "brief_done",
