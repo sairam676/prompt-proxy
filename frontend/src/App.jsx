@@ -286,15 +286,16 @@ export default function App() {
 // ── Step card — shown live as pipeline runs ────────────────────────────────────
 function StepCard({ step }) {
   const icons = {
-    step:               "⚙",
-    status:             "⟳",
-    extraction_done:    "🔍",
-    diagnosis:          "🎯",
-    gate_blocked:       "❓",
-    llm_done:           "⚡",
-    verification_done:  "🛡",
-    interpretation_done:"✅",
-  };
+  step:               "⚙",
+  status:             "⟳",
+  extraction_done:    "🔍",
+  diagnosis:          "🎯",
+  gate_blocked:       "❓",
+  llm_done:           "⚡",
+  repair_attempt:     "🔧",
+  verification_done:  "🛡",
+  interpretation_done:"✅",
+};
 
   const icon = icons[step.type] ?? "·";
 

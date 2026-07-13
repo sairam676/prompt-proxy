@@ -162,6 +162,27 @@ work — state this explicitly, don't just assert the fix is correct.
 Be precise and complete. No filler, no preamble, no sign-off.
 `.trim();
 
+/**
+ * buildRepairPrompt — used when verifyFix rejects a fix (real syntax error
+ * or fabricated package). Feeds the exact, specific failure back to the
+ * SAME real LLM that produced it, and asks for a correction — not a second
+ * model's opinion, just the original model given real error detail it
+ * didn't have before.
+ */
+export const buildRepairPrompt = (previousResponse, issues) => `
+Your previous response had a verified problem. Here is the exact issue found:
+
+${issues.map(i => `- ${i.description}`).join("\n")}
+
+Here was your previous response in full:
+${previousResponse}
+
+Provide a corrected version that fixes this specific problem. Keep the rest of
+your diagnosis and reasoning if it was correct — only revise what's needed to
+resolve the issue(s) listed above. Output in the same format as before
+(diagnosis, fix, self-critique, etc.). Do not repeat the same mistake.
+`.trim();
+
 const formatContext = (ctx) => {
   const parts = [];
   if (ctx.goal)             parts.push(`Goal: ${ctx.goal}`);

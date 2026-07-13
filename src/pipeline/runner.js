@@ -24,12 +24,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI    from "openai";
 import Groq      from "groq-sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
+import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt, buildRepairPrompt } from "./extractor.js";
 import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt } from "./extractor.js";
 import { verifyFix }         from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const MAX_REPAIR_ATTEMPTS = 1; // one automatic re-call on a rejected fix, capped for cost predictability
 
 // ── Call user's LLM ─────────────────────────────────────────────────────────
 const callUserLLM = async (provider, apiKey, promptText, complexity, onStep) => {
@@ -213,31 +214,50 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
     return result;
   }
 
-  // Step 3: Deterministic npm check — the one fact-check worth keeping
-  onStep({ type: "step", step: 3, total: 4, message: "Checking any package imports against npm..." });
-  const verification = await verifyFix(llmResponse, structuredContext, onStep);
+ // Step 3: Deterministic npm + syntax check — the one fact-check worth keeping
+  onStep({ type: "step", step: 3, total: 4, message: "Checking code syntax and package imports..." });
+  let verification = await verifyFix(llmResponse, structuredContext, onStep);
+  let finalResponse = llmResponse;
+  let repairAttempts = 0;
+
+  // Auto-repair loop: if verification found a real, specific problem, feed
+  // it back to the SAME LLM once and let it self-correct with actual error
+  // detail — rather than showing the user a rejected fix it never got a
+  // chance to revise. Capped so cost stays predictable.
+  while (verification.status === "rejected" && repairAttempts < MAX_REPAIR_ATTEMPTS) {
+    repairAttempts += 1;
+    onStep({
+      type: "repair_attempt",
+      message: `Fix had an issue — asking your LLM to correct it (attempt ${repairAttempts})...`,
+      data: { issues: verification.issues },
+    });
+
+    const repairPrompt = buildRepairPrompt(finalResponse, verification.issues);
+    finalResponse = await callUserLLM(provider, apiKey, repairPrompt, complexity, onStep);
+    verification = await verifyFix(finalResponse, structuredContext, onStep);
+  }
 
   // Step 4: Structure the response for the UI (cheap, fast — formatting not judgment)
   onStep({ type: "step", step: 4, total: 4, message: "Building your action plan..." });
   const interpretation = await interpretResponse(
-    llmResponse,
+    finalResponse,
     { root_cause: null, key_insight: null }, // diagnosis now lives inside llmResponse itself, interpreter extracts it from the text
     structuredContext, verification, onStep
   );
 
   const result = {
     blocked: false,
-    rawLLMResponse: llmResponse,
+    rawLLMResponse: finalResponse,
     surgicalPrompt: diagnosticPrompt,
     verification,
     interpretation,
+    repairAttempts,
     severity: complexity === "simple" ? "low" : "medium",
     tokensSaved: estimateTokensSaved(structuredContext, diagnosticPrompt),
   };
 
   onStep({ type: "done", message: "Done", data: result });
   return result;
-};
 
 const estimateTokensSaved = (ctx, prompt) => {
   const rawLen      = (ctx.raw_intent ?? ctx.goal ?? "").length;
