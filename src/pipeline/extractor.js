@@ -59,7 +59,7 @@ export const buildBrief = async (userContext, onStep) => {
   onStep({ type: "status", message: "Laying out context..." });
 
   const response = await groq.chat.completions.create({
-    model:    "llama-3.1-8b-instant", // pure compression/formatting, not judgment — 8B is fine here
+    model:    "llama-3.1-8b-instant",
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: BRIEF_BUILDER_PROMPT },
@@ -67,7 +67,21 @@ export const buildBrief = async (userContext, onStep) => {
     ],
   });
 
-  const result = JSON.parse(response.choices[0].message.content.trim());
+  let result;
+  try {
+    result = JSON.parse(response.choices[0].message.content.trim());
+  } catch (_) {
+    // Groq's JSON mode occasionally breaks on pasted code containing quotes
+    // or newlines that corrupt the JSON structure. Fall back to using the
+    // user's raw context directly as the brief rather than crashing —
+    // compression is a nice-to-have, not something worth failing the whole
+    // pipeline over.
+    result = {
+      brief: formatContext(userContext),
+      distinct_issue_count: 1,
+      complexity: "medium",
+    };
+  }
 
   onStep({
     type:    "brief_done",
