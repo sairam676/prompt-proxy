@@ -14,6 +14,7 @@ export default function App() {
   const [loading, setLoading]   = useState(false);
   const [apiKey, setApiKey]     = useState("");
   const [provider, setProvider] = useState("gemini");
+  const [mode, setMode] = useState(null); // null = auto-detect, "debug" | "general" = explicit
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
@@ -32,7 +33,7 @@ export default function App() {
     try {
       const res  = await fetch(`${API}/start`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: raw }),
+        body: JSON.stringify({ message: raw, mode }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -172,6 +173,31 @@ export default function App() {
                 identify the root cause, then send one perfect prompt to your LLM.
                 You get a clear action plan — not a wall of text to decode.
               </p>
+
+              {/* Mode toggle — auto-detect by default, or force debug/general */}
+              <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 16 }}>
+                <button
+                  onClick={() => setMode(mode === "debug" ? null : "debug")}
+                  style={{
+                    ...S.pill, cursor: "pointer", border: "1px solid #e5e7eb",
+                    background: mode === "debug" ? "#111827" : "transparent",
+                    color: mode === "debug" ? "#fff" : "#6b7280",
+                  }}
+                >
+                  🐛 Debug mode
+                </button>
+                <button
+                  onClick={() => setMode(mode === "general" ? null : "general")}
+                  style={{
+                    ...S.pill, cursor: "pointer", border: "1px solid #e5e7eb",
+                    background: mode === "general" ? "#111827" : "transparent",
+                    color: mode === "general" ? "#fff" : "#6b7280",
+                  }}
+                >
+                  💬 Ask anything
+                </button>
+              </div>
+
               <div style={S.pills}>
                 {["Root cause identified","One LLM call","Clear next action","Any domain"].map(p => (
                   <span key={p} style={S.pill}>{p}</span>

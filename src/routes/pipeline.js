@@ -16,6 +16,7 @@ import { runInterviewTurn, forceExtractContext } from "../middleware/interviewer
 import { runPipeline } from "../pipeline/runner.js";
 import { v4 as uuidv4 } from "uuid";
 import { verifySyntax } from "../pipeline/syntaxVerifier.js";
+import { classifyTaskType } from "../pipeline/taskRouter.js";
 
 const router = express.Router();
 
@@ -24,12 +25,11 @@ const router = express.Router();
 // ── POST /api/pipeline/start ──────────────────────────────────────────────────
 // Start interview — same as before
 router.post("/start", async (req, res) => {
-  
   try {
-    const { message } = req.body;
+    const { message, mode } = req.body;
     if (!message?.trim()) return res.status(400).json({ error: "message is required" });
-      
-     // Deterministic pre-check: if the pasted message contains a code block
+
+    // Deterministic pre-check: if the pasted message contains a code block
     // with a syntax error, that IS the bug — skip the interview and LLM
     // round-trip entirely, just tell the user directly.
     const syntaxCheck = verifySyntax(message);
@@ -42,9 +42,30 @@ router.post("/start", async (req, res) => {
         message: "Found a syntax error directly — no need to call your LLM for this one.",
       });
     }
-    
+
     const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
+    const taskType = classifyTaskType(message, mode);
+    session.taskType = taskType;
+
+    // General/conceptual questions skip the interview entirely — there's
+    // no code to gather context on, no error to reproduce. Build minimal
+    // context directly and go straight to "complete".
+    if (taskType === "general") {
+      session.structuredContext = {
+        goal: message.trim(),
+        existing_context: null,
+        already_tried: null,
+        expected_output: null,
+        constraints: null,
+        domain: null,
+        raw_intent: message.trim(),
+        complexity: "simple",
+      };
+      session.status = "complete";
+      await saveSession(sessionId, session);
+      return res.json({ sessionId, status: "complete", taskType });
+    }
 
     const result = await runInterviewTurn(message, []);
     session.history   = result.history;
