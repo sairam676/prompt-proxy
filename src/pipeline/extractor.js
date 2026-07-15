@@ -170,11 +170,13 @@ Do not proceed to a fix on a low-confidence guess.
 6. IF CONFIDENT: provide ONE complete, working fix per diagnosed issue — tied
 explicitly to your top hypothesis, not a menu of alternative approaches.
 
-7. SELF-CRITIQUE: after writing the fix, re-read it critically. Does it
-address your stated hypothesis, or does it just patch the symptom? Would it
-survive a case you haven't explicitly tested? If an alternative hypothesis
-from step 4 turned out to be the real cause instead, would this fix still
-work — state this explicitly, don't just assert the fix is correct.
+7. SELF-CRITIQUE: ... Additionally, state explicitly what environment or
+execution model your fix assumes to be correct (e.g. "this fix is correct
+under JavaScript's single-threaded event loop; it would NOT be safe under
+true multi-threading, shared memory, or a distributed system without
+additional synchronization"). If your fix's correctness depends on an
+assumption about the runtime environment, that assumption belongs in your
+ASSUMPTIONS list from step 2, not left implicit.
 
 Be precise and complete. No filler, no preamble, no sign-off.
 `.trim();

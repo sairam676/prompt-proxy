@@ -70,9 +70,9 @@ export const verifyFix = async (llmResponse, userContext, onStep) => {
   const verification = {
     status,
     issues: allIssues,
-    notes: allIssues.length
-      ? "One or more issues found — see details."
-      : "No syntax errors and all imported packages exist on npm.",
+   notes: allIssues.length
+  ? "One or more issues found — see details."
+  : "Code parses correctly and all imported packages exist. This does NOT confirm the fix resolves the described bug under real conditions.",
   };
 
   onStep({ type: "verification_done", message: `Fix check: ${status}`, data: verification });

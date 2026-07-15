@@ -569,7 +569,7 @@ function DynamicSection({ section }) {
             marginLeft: 8, fontSize: 10, fontWeight: 600, padding: "2px 6px",
             borderRadius: 4, ...badgeStyle,
           }}>
-            {section.verification_status === "verified" ? "✅ verified"
+            {section.verification_status === "verified" ? "✅ syntax & imports OK"
               : section.verification_status === "rejected" ? "❌ rejected"
               : "⚠ unverified"}
           </span>
