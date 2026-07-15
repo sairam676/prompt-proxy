@@ -34,7 +34,7 @@ router.post("/start", async (req, res) => {
     // round-trip entirely, just tell the user directly.
   const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
-    const taskType = classifyTaskType(message, mode);
+    const taskType =await  classifyTaskType(message, mode);
     session.taskType = taskType;
 
     // Syntax pre-check only makes sense for debug tasks — running it on a
