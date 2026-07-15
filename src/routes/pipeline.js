@@ -32,21 +32,26 @@ router.post("/start", async (req, res) => {
     // Deterministic pre-check: if the pasted message contains a code block
     // with a syntax error, that IS the bug — skip the interview and LLM
     // round-trip entirely, just tell the user directly.
-    const syntaxCheck = verifySyntax(message);
-    if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
-      const sessionId = uuidv4();
-      return res.json({
-        sessionId,
-        status: "complete_syntax_only",
-        syntaxIssues: syntaxCheck.issues,
-        message: "Found a syntax error directly — no need to call your LLM for this one.",
-      });
-    }
-
-    const sessionId = uuidv4();
+  const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
     const taskType = classifyTaskType(message, mode);
     session.taskType = taskType;
+
+    // Syntax pre-check only makes sense for debug tasks — running it on a
+    // general/conceptual question risks false-positiving on ordinary
+    // English (apostrophes read as unterminated strings, etc.) since
+    // there's no real code to isolate in the first place.
+    if (taskType === "debug") {
+      const syntaxCheck = verifySyntax(message);
+      if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
+        return res.json({
+          sessionId,
+          status: "complete_syntax_only",
+          syntaxIssues: syntaxCheck.issues,
+          message: "Found a syntax error directly — no need to call your LLM for this one.",
+        });
+      }
+    }
 
     // General/conceptual questions skip the interview entirely — there's
     // no code to gather context on, no error to reproduce. Build minimal
