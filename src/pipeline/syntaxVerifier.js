@@ -23,13 +23,32 @@ const extractCodeBlocks = (llmResponse) => {
 
 const looksLikeCode = (text) => /function\s|=>|const\s|let\s|var\s|\{|\}/.test(text);
 
+const isolateCodeLines = (text) => {
+  const lines = text.split("\n");
+  const codeLines = [];
+  let inCode = false;
+  for (const line of lines) {
+    const lineLooksLikeCode = /function\s|=>|const\s|let\s|var\s|require\(|import\s|^\s*\}|^\s*\{|;\s*$/.test(line);
+    if (lineLooksLikeCode) inCode = true;
+    if (inCode) codeLines.push(line);
+  }
+  return codeLines.join("\n");
+};
+
 export const verifySyntax = (llmResponse) => {
   const blocks = extractCodeBlocks(llmResponse);
 
-  // Fallback: no fenced code blocks found — the message might still BE
-  // code, just pasted raw without ``` fences. Try parsing it directly
-  // rather than silently skipping the check.
-  const candidates = blocks.length > 0 ? blocks : [llmResponse];
+  let candidates;
+  if (blocks.length > 0) {
+    candidates = blocks;
+  } else {
+    const isolated = isolateCodeLines(llmResponse);
+    candidates = isolated.trim().length > 0 ? [isolated] : [];
+  }
+
+  if (!candidates.length) {
+    return { checked: false, issues: [] };
+  }
 
   const issues = [];
   candidates.forEach((code, i) => {
@@ -40,8 +59,6 @@ export const verifySyntax = (llmResponse) => {
         allowReturnOutsideFunction: true,
       });
     } catch (err) {
-      // Only report as an issue if this looks like it was actually meant
-      // to be code — avoid flagging plain English text as a syntax error.
       if (looksLikeCode(code)) {
         issues.push({
           blockIndex: i,

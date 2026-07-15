@@ -12,6 +12,7 @@
     "@anthropic-ai/sdk": "^0.109.0",
     "@google/generative-ai": "^0.24.1",
     "acorn": "^8.17.0",
+    "acorn-jsx": "^5.3.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

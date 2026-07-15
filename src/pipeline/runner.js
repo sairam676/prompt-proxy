@@ -25,7 +25,7 @@ import OpenAI    from "openai";
 import Groq      from "groq-sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt, buildRepairPrompt } from "./extractor.js";
-import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt } from "./extractor.js";
+
 import { verifyFix }         from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
 
@@ -258,7 +258,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
 
   onStep({ type: "done", message: "Done", data: result });
   return result;
-
+};
 const estimateTokensSaved = (ctx, prompt) => {
   const rawLen      = (ctx.raw_intent ?? ctx.goal ?? "").length;
   const promptLen   = prompt.length;
