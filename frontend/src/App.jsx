@@ -40,8 +40,6 @@ export default function App() {
       setSessionId(data.sessionId);
 
       if (data.status === "complete_syntax_only") {
-        // Deterministic syntax check caught the bug directly — no LLM
-        // round-trip needed. Show it and stay idle, ready for a new message.
         const issueText = data.syntaxIssues
           .map(issue => `⚠ ${issue.description}`)
           .join("\n");
@@ -72,9 +70,6 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (data.status === "complete") {
-        // If we already have a key (this was a tie-break answer resuming
-        // a pipeline that already asked for the key once), just resume
-        // the run automatically instead of asking again.
         if (data.resumedFromTieBreak && apiKey.trim()) {
           runPipeline();
         } else {
@@ -122,7 +117,6 @@ export default function App() {
         return;
       }
 
-      // All other step types — show live in steps feed
       setSteps(prev => [...prev, data]);
     };
 
@@ -174,14 +168,13 @@ export default function App() {
                 You get a clear action plan — not a wall of text to decode.
               </p>
 
-              {/* Mode toggle — auto-detect by default, or force debug/general */}
               <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 16 }}>
                 <button
                   onClick={() => setMode(mode === "debug" ? null : "debug")}
                   style={{
-                    ...S.pill, cursor: "pointer", border: "1px solid #e5e7eb",
-                    background: mode === "debug" ? "#111827" : "transparent",
-                    color: mode === "debug" ? "#fff" : "#6b7280",
+                    ...S.pill, cursor: "pointer", border: `1px solid ${T.hair}`,
+                    background: mode === "debug" ? T.amber : "transparent",
+                    color: mode === "debug" ? T.ink : T.muted,
                   }}
                 >
                   🐛 Debug mode
@@ -189,9 +182,9 @@ export default function App() {
                 <button
                   onClick={() => setMode(mode === "general" ? null : "general")}
                   style={{
-                    ...S.pill, cursor: "pointer", border: "1px solid #e5e7eb",
-                    background: mode === "general" ? "#111827" : "transparent",
-                    color: mode === "general" ? "#fff" : "#6b7280",
+                    ...S.pill, cursor: "pointer", border: `1px solid ${T.hair}`,
+                    background: mode === "general" ? T.amber : "transparent",
+                    color: mode === "general" ? T.ink : T.muted,
                   }}
                 >
                   💬 Ask anything
@@ -254,7 +247,7 @@ export default function App() {
   provider === "claude" ? "sk-ant-..." :
   provider === "groq"   ? "gsk_..." :
   provider === "openai" ? "sk-..." :
-  "AQia..."
+  "your Gemini key"
 }
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
@@ -336,7 +329,7 @@ function StepCard({ step }) {
               <Tag label="Top hypothesis" value={`${step.data.hypotheses[0].theory} (${step.data.hypotheses[0].confidence}%)`} />
             )}
             <Tag label="Area"       value={step.data.problemArea} />
-            <Tag label="Severity"   value={step.data.severity} color={step.data.severity === "high" ? "#dc2626" : step.data.severity === "medium" ? "#d97706" : "#059669"} />
+            <Tag label="Severity"   value={step.data.severity} color={step.data.severity === "high" ? T.red : step.data.severity === "medium" ? T.amber : T.green} />
           </div>
         )}
         {step.data && step.type === "llm_done" && (
@@ -353,7 +346,7 @@ function StepCard({ step }) {
 
 function Tag({ label, value, color }) {
   return (
-    <span style={{ ...ST.tag, color: color ?? "#6b7280" }}>
+    <span style={{ ...ST.tag, color: color ?? T.muted }}>
       <span style={ST.tagLabel}>{label}:</span> {value}
     </span>
   );
@@ -366,7 +359,7 @@ function ResultCard({ result }) {
     tokensSaved, surgicalPrompt, rawLLMResponse,
     whatToVerify, potentialRisks, verification,
   } = result;
-  const diagnosisList = diagnoses ?? (result.diagnosis ? [result.diagnosis] : []); // fallback for older result shape
+  const diagnosisList = diagnoses ?? (result.diagnosis ? [result.diagnosis] : []);
 
   const [tab, setTab]       = useState("action");
   const [copied, setCopied] = useState(false);
@@ -379,30 +372,31 @@ function ResultCard({ result }) {
   };
 
   const severityColor =
-    severity === "high"   ? "#dc2626" :
-    severity === "medium" ? "#d97706" : "#059669";
+    severity === "high"   ? T.red :
+    severity === "medium" ? T.amber : T.green;
 
   return (
     <div style={R.card}>
       <div style={R.header}>
         <div style={R.headerLeft}>
-          <span style={{ ...R.chip, background: severityColor + "15", color: severityColor }}>
+          <span style={{ ...R.chip, background: severityColor + "22", color: severityColor }}>
             {severity} severity
           </span>
           {tokensSaved > 0 && (
-            <span style={{ ...R.chip, background: "#d1fae5", color: "#065f46" }}>
+            <span style={{ ...R.chip, background: T.green + "22", color: T.green }}>
               ~{tokensSaved} tokens saved
             </span>
           )}
           {verification?.status && (
             <span style={{
               ...R.chip,
-              background: verification.status === "verified" ? "#d1fae5"
-                : verification.status === "rejected" ? "#fee2e2" : "#fef3c7",
-              color: verification.status === "verified" ? "#065f46"
-                : verification.status === "rejected" ? "#991b1b" : "#92400e",
+              background: verification.status === "verified" ? T.green + "22"
+                : verification.status === "rejected" ? T.red + "22" : T.amber + "22",
+              color: verification.status === "verified" ? T.green
+                : verification.status === "rejected" ? T.red : T.amber,
             }}>
-              fix {verification.status}
+              {verification.status === "verified" ? "syntax & imports OK"
+                : verification.status === "rejected" ? "fix rejected" : "fix unverified"}
             </span>
           )}
         </div>
@@ -418,12 +412,12 @@ function ResultCard({ result }) {
       ))}
 
       {interpretation?.confidence != null && (
-  <div style={{ padding: "10px 16px", borderBottom: "1px solid #f3f4f6" }}>
+  <div style={{ padding: "10px 16px", borderBottom: `1px solid ${T.hair}` }}>
     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-      <span style={{ fontSize: 11, fontWeight: 700, color: "#6b7280" }}>CONFIDENCE</span>
+      <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 0.5 }}>CONFIDENCE</span>
       <span style={{
         fontSize: 13, fontWeight: 600,
-        color: interpretation.confidence >= 75 ? "#059669" : interpretation.confidence >= 50 ? "#d97706" : "#dc2626",
+        color: interpretation.confidence >= 75 ? T.green : interpretation.confidence >= 50 ? T.amber : T.red,
       }}>
         {interpretation.confidence}%
       </span>
@@ -431,35 +425,34 @@ function ResultCard({ result }) {
     {interpretation.evidence?.length > 0 && (
       <div style={{ marginBottom: 6 }}>
         {interpretation.evidence.map((e, i) => (
-          <p key={i} style={{ fontSize: 12, color: "#065f46", margin: "2px 0" }}>✓ {e}</p>
+          <p key={i} style={{ fontSize: 12, color: T.amber, margin: "2px 0" }}>✓ {e}</p>
         ))}
       </div>
     )}
     {interpretation.assumptions?.length > 0 && (
       <div style={{ marginBottom: 6 }}>
         {interpretation.assumptions.map((a, i) => (
-          <p key={i} style={{ fontSize: 12, color: "#92400e", margin: "2px 0" }}>? {a}</p>
+          <p key={i} style={{ fontSize: 12, color: T.violet, margin: "2px 0" }}>? {a}</p>
         ))}
       </div>
     )}
     {interpretation.alternative_hypotheses?.length > 0 && (
       <div>
-        <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 600 }}>ALTERNATIVES CONSIDERED</span>
+        <span style={{ fontSize: 10, color: T.muted, fontWeight: 600, letterSpacing: 0.5 }}>ALTERNATIVES CONSIDERED</span>
         {interpretation.alternative_hypotheses.map((h, i) => (
-          <p key={i} style={{ fontSize: 12, color: "#6b7280", margin: "2px 0" }}>
+          <p key={i} style={{ fontSize: 12, color: T.muted, margin: "2px 0" }}>
             {h.theory} ({h.confidence}%)
           </p>
         ))}
       </div>
     )}
     {interpretation.evidence_audit_warning && (
-      <p style={{ fontSize: 11, color: "#dc2626", marginTop: 6, fontStyle: "italic" }}>
+      <p style={{ fontSize: 11, color: T.red, marginTop: 6, fontStyle: "italic" }}>
         ⚠ {interpretation.evidence_audit_warning}
       </p>
     )}
   </div>
 )}
-
 
       {keyInsight && (
         <div style={{ padding: "0 16px 10px" }}>
@@ -504,8 +497,8 @@ function ResultCard({ result }) {
             </div>
           )}
           {(potentialRisks ?? interpretation.what_could_go_wrong) && (
-            <div style={{ ...R.actionBlock, background:"#fff7ed", borderRadius:8, padding:"10px 12px" }}>
-              <span style={{ ...R.actionLabel, color:"#d97706" }}>⚠ Watch out for</span>
+            <div style={{ ...R.actionBlock, background: T.amber + "14", borderRadius:8, padding:"10px 12px" }}>
+              <span style={{ ...R.actionLabel, color: T.amber }}>⚠ Watch out for</span>
               <p style={R.actionValue}>{potentialRisks ?? interpretation.what_could_go_wrong}</p>
             </div>
           )}
@@ -516,8 +509,8 @@ function ResultCard({ result }) {
             </div>
           )}
           {interpretation.llm_missed && (
-            <div style={{ ...R.actionBlock, background:"#fef2f2", borderRadius:8, padding:"10px 12px" }}>
-              <span style={{ ...R.actionLabel, color:"#dc2626" }}>⚡ LLM didn't cover</span>
+            <div style={{ ...R.actionBlock, background: T.red + "14", borderRadius:8, padding:"10px 12px" }}>
+              <span style={{ ...R.actionLabel, color: T.red }}>⚡ LLM didn't cover</span>
               <p style={R.actionValue}>{interpretation.llm_missed}</p>
             </div>
           )}
@@ -550,9 +543,9 @@ function DynamicSection({ section }) {
   const icon = typeIcons[section.type] ?? "•";
 
   const badgeStyle = {
-    verified:   { background: "#d1fae5", color: "#065f46" },
-    unverified: { background: "#fef3c7", color: "#92400e" },
-    rejected:   { background: "#fee2e2", color: "#991b1b" },
+    verified:   { background: T.green + "22", color: T.green },
+    unverified: { background: T.amber + "22", color: T.amber },
+    rejected:   { background: T.red + "22", color: T.red },
   }[section.verification_status];
 
   return (
@@ -560,7 +553,7 @@ function DynamicSection({ section }) {
       <span style={R.actionLabel}>
         {icon} {section.title}
         {section.issue_id && (
-          <span style={{ marginLeft: 8, fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>
+          <span style={{ marginLeft: 8, fontSize: 10, color: T.muted, fontWeight: 400 }}>
             ({section.issue_id.replace("_", " ")})
           </span>
         )}
@@ -577,8 +570,8 @@ function DynamicSection({ section }) {
       </span>
       {section.verification_status === "rejected" && section.verification_note && (
         <div style={{
-          fontSize: 12, color: "#991b1b", background: "#fef2f2",
-          border: "1px solid #fecaca", borderRadius: 6, padding: "6px 10px", marginTop: 4,
+          fontSize: 12, color: T.red, background: T.red + "14",
+          border: `1px solid ${T.red}33`, borderRadius: 6, padding: "6px 10px", marginTop: 4,
         }}>
           ⚠ Verifier flagged this: {section.verification_note}
         </div>
@@ -620,11 +613,11 @@ function ThinkingDots({ label = "Thinking..." }) {
     <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0" }}>
       <div style={{ display:"flex", gap:4 }}>
         {[0,150,300].map(d => (
-          <span key={d} style={{ width:5, height:5, borderRadius:"50%", background:"#9ca3af",
+          <span key={d} style={{ width:5, height:5, borderRadius:"50%", background: T.muted,
             display:"inline-block", animation:`blink 1.2s ${d}ms infinite` }} />
         ))}
       </div>
-      <span style={{ fontSize:12, color:"#9ca3af" }}>{label}</span>
+      <span style={{ fontSize:12, color: T.muted }}>{label}</span>
     </div>
   );
 }
@@ -636,98 +629,115 @@ const Arrow = () => (
   </svg>
 );
 
-// ── Styles ─────────────────────────────────────────────────────────────────────
+// ── Design tokens — mirrors landing.html's palette ──────────────────────────────
+const T = {
+  ink:     "#0B0E14",
+  panel:   "#12161F",
+  panel2:  "#171C27",
+  text:    "#E7E9EE",
+  muted:   "#7C8194",
+  amber:   "#E8A33D",
+  amberDim:"#6B5326",
+  violet:  "#6E7DFF",
+  violetDim:"#333A6B",
+  red:     "#E85B4D",
+  green:   "#4FBE8C",
+  hair:    "rgba(231,233,238,0.09)",
+};
+
 const FONT = "'Inter', system-ui, sans-serif";
+const DISPLAY = "'Space Grotesk', 'Inter', sans-serif";
 const MONO = "'IBM Plex Mono', monospace";
 
 const S = {
-  shell:           { display:"flex", flexDirection:"column", height:"100vh", background:"#f9fafb", fontFamily:FONT, color:"#111827" },
-  header:          { display:"flex", alignItems:"center", gap:12, padding:"0 28px", height:52, borderBottom:"1px solid #e5e7eb", background:"#fff", flexShrink:0 },
+  shell:           { display:"flex", flexDirection:"column", height:"100vh", background:T.ink, fontFamily:FONT, color:T.text },
+  header:          { display:"flex", alignItems:"center", gap:12, padding:"0 28px", height:52, borderBottom:`1px solid ${T.hair}`, background:T.panel, flexShrink:0 },
   brand:           { display:"flex", alignItems:"center", gap:8 },
-  mark:            { width:26, height:26, background:"#111827", color:"#fff", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, letterSpacing:0.5, flexShrink:0 },
-  name:            { fontSize:14, fontWeight:600 },
-  tagline:         { fontSize:11, color:"#9ca3af", flex:1 },
-  newBtn:          { fontSize:12, color:"#111827", background:"transparent", border:"1px solid #e5e7eb", borderRadius:6, padding:"5px 12px", cursor:"pointer" },
+  mark:            { width:26, height:26, background:T.amber, color:T.ink, borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, letterSpacing:0.5, flexShrink:0 },
+  name:            { fontSize:14, fontWeight:600, fontFamily:DISPLAY },
+  tagline:         { fontSize:11, color:T.muted, flex:1 },
+  newBtn:          { fontSize:12, color:T.text, background:"transparent", border:`1px solid ${T.hair}`, borderRadius:6, padding:"5px 12px", cursor:"pointer" },
   main:            { flex:1, overflowY:"auto", padding:"0 28px" },
   col:             { maxWidth:660, margin:"0 auto", paddingTop:40, paddingBottom:24 },
   empty:           { textAlign:"center", paddingTop:60 },
-  emptyH:          { fontSize:20, fontWeight:600, letterSpacing:-0.5, marginBottom:10 },
-  emptyB:          { fontSize:14, color:"#6b7280", lineHeight:1.7, maxWidth:420, margin:"0 auto 24px" },
+  emptyH:          { fontSize:22, fontWeight:600, letterSpacing:-0.5, marginBottom:10, fontFamily:DISPLAY, color:T.text },
+  emptyB:          { fontSize:14, color:T.muted, lineHeight:1.7, maxWidth:420, margin:"0 auto 24px" },
   pills:           { display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center" },
-  pill:            { fontSize:11, color:"#6b7280", border:"1px solid #e5e7eb", borderRadius:20, padding:"3px 12px" },
-  footer:          { borderTop:"1px solid #e5e7eb", background:"#fff", padding:"14px 28px", flexShrink:0 },
+  pill:            { fontSize:11, color:T.muted, border:`1px solid ${T.hair}`, borderRadius:20, padding:"3px 12px" },
+  footer:          { borderTop:`1px solid ${T.hair}`, background:T.panel, padding:"14px 28px", flexShrink:0 },
   keyBox:          { maxWidth:660, margin:"0 auto" },
-  keyTitle:        { fontSize:13, fontWeight:500, color:"#111827", marginBottom:4 },
-  keySub:          { fontSize:11, color:"#9ca3af", marginBottom:12 },
+  keyTitle:        { fontSize:13, fontWeight:500, color:T.text, marginBottom:4 },
+  keySub:          { fontSize:11, color:T.muted, marginBottom:12 },
   keyRow:          { display:"flex", gap:8, alignItems:"center" },
-  providerToggle:  { display:"flex", border:"1px solid #e5e7eb", borderRadius:6, overflow:"hidden" },
-  providerBtn:     { padding:"8px 12px", fontSize:12, background:"transparent", border:"none", cursor:"pointer", color:"#6b7280" },
-  providerBtnActive:{ background:"#111827", color:"#fff" },
-  keyInput:        { flex:1, padding:"8px 12px", fontSize:12, border:"1px solid #e5e7eb", borderRadius:6, outline:"none", fontFamily:MONO },
-  runBtn:          { background:"#111827", color:"#fff", border:"none", borderRadius:6, padding:"8px 20px", fontSize:13, fontWeight:500, cursor:"pointer" },
+  providerToggle:  { display:"flex", border:`1px solid ${T.hair}`, borderRadius:6, overflow:"hidden" },
+  providerBtn:     { padding:"8px 12px", fontSize:12, background:"transparent", border:"none", cursor:"pointer", color:T.muted },
+  providerBtnActive:{ background:T.amber, color:T.ink, fontWeight:500 },
+  keyInput:        { flex:1, padding:"8px 12px", fontSize:12, border:`1px solid ${T.hair}`, borderRadius:6, outline:"none", fontFamily:MONO, background:T.panel2, color:T.text },
+  runBtn:          { background:T.amber, color:T.ink, border:"none", borderRadius:6, padding:"8px 20px", fontSize:13, fontWeight:600, cursor:"pointer" },
   inputRow:        { maxWidth:660, margin:"0 auto", display:"flex", gap:8, alignItems:"flex-end" },
-  textarea:        { flex:1, resize:"none", border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:"#111827", background:"#fff", outline:"none", lineHeight:1.5 },
-  sendBtn:         { width:38, height:38, background:"#111827", color:"#fff", border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
+  textarea:        { flex:1, resize:"none", border:`1px solid ${T.hair}`, borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:T.text, background:T.panel2, outline:"none", lineHeight:1.5 },
+  sendBtn:         { width:38, height:38, background:T.amber, color:T.ink, border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
   hintRow:         { maxWidth:660, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
-  hint:            { fontSize:11, color:"#d1d5db" },
-  skipBtn:         { fontSize:11, color:"#6b7280", background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
+  hint:            { fontSize:11, color:T.muted },
+  skipBtn:         { fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
 };
 
 const B = {
   userRow: { display:"flex", justifyContent:"flex-end", marginBottom:14 },
-  user:    { background:"#111827", color:"#f9fafb", borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:14, lineHeight:1.6, maxWidth:480 },
+  user:    { background:T.panel2, color:T.text, border:`1px solid ${T.hair}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:14, lineHeight:1.6, maxWidth:480 },
   botRow:  { display:"flex", gap:10, marginBottom:14, alignItems:"flex-start" },
-  avatar:  { width:26, height:26, background:"#f3f4f6", border:"1px solid #e5e7eb", borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, color:"#6b7280", marginTop:2 },
-  bot:     { background:"#fff", border:"1px solid #e5e7eb", borderRadius:"2px 12px 12px 12px", padding:"10px 14px", maxWidth:500 },
-  text:    { margin:0, fontSize:14, lineHeight:1.7, color:"#111827" },
+  avatar:  { width:26, height:26, background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, color:T.muted, marginTop:2 },
+  bot:     { background:T.panel, border:`1px solid ${T.hair}`, borderRadius:"2px 12px 12px 12px", padding:"10px 14px", maxWidth:500 },
+  text:    { margin:0, fontSize:14, lineHeight:1.7, color:T.text },
   sysRow:  { display:"flex", justifyContent:"center", marginBottom:10 },
-  sys:     { fontSize:11, color:"#9ca3af", background:"#f9fafb", border:"1px solid #f3f4f6", borderRadius:20, padding:"3px 12px" },
+  sys:     { fontSize:11, color:T.muted, background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:20, padding:"3px 12px" },
 };
 
 const ST = {
   feed:     { display:"flex", flexDirection:"column", gap:8, marginBottom:16 },
-  card:     { display:"flex", gap:10, padding:"10px 14px", background:"#fff", border:"1px solid #e5e7eb", borderRadius:8, animation:"fadeUp 0.2s ease" },
+  card:     { display:"flex", gap:10, padding:"10px 14px", background:T.panel, border:`1px solid ${T.hair}`, borderRadius:8, animation:"fadeUp 0.2s ease" },
   icon:     { fontSize:14, flexShrink:0, marginTop:1 },
   content:  { flex:1 },
-  msg:      { fontSize:13, color:"#374151", marginBottom:4 },
+  msg:      { fontSize:13, color:T.text, marginBottom:4 },
   tags:     { display:"flex", gap:12, flexWrap:"wrap" },
   tag:      { fontSize:11 },
-  tagLabel: { color:"#9ca3af" },
+  tagLabel: { color:T.muted },
 };
 
 const R = {
-  card:          { background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
-  header:        { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:"1px solid #f3f4f6" },
-  headerLeft:    { display:"flex", gap:8 },
+  card:          { background:T.panel, border:`1px solid ${T.hair}`, borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
+  header:        { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:`1px solid ${T.hair}` },
+  headerLeft:    { display:"flex", gap:8, flexWrap:"wrap" },
   chip:          { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
-  rootCause:     { padding:"14px 16px", borderBottom:"1px solid #f3f4f6", background:"#fafafa" },
-  rootLabel:     { fontSize:9, fontWeight:700, color:"#9ca3af", letterSpacing:1, display:"block", marginBottom:4 },
-  rootText:      { fontSize:14, color:"#111827", lineHeight:1.6 },
-  insight:       { fontSize:13, color:"#6366f1", lineHeight:1.6, marginTop:6, fontStyle:"italic" },
-  primaryAction: { padding:"12px 16px", background:"#111827", borderBottom:"1px solid #1f2937" },
-  primaryLabel:  { fontSize:9, fontWeight:700, color:"#6b7280", letterSpacing:1, display:"block", marginBottom:4 },
-  primaryText:   { fontSize:14, color:"#fff", lineHeight:1.6, fontWeight:500 },
-  summary:       { padding:"10px 16px", borderBottom:"1px solid #f3f4f6" },
-  summaryText:   { fontSize:13, color:"#6b7280", lineHeight:1.6, fontStyle:"italic" },
-  tabs:          { display:"flex", borderBottom:"1px solid #f3f4f6" },
-  tab:           { fontSize:12, color:"#9ca3af", background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
-  tabActive:     { color:"#111827", borderBottom:"2px solid #111827" },
+  rootCause:     { padding:"14px 16px", borderBottom:`1px solid ${T.hair}`, background:T.panel2 },
+  rootLabel:     { fontSize:9, fontWeight:700, color:T.muted, letterSpacing:1, display:"block", marginBottom:4 },
+  rootText:      { fontSize:14, color:T.text, lineHeight:1.6 },
+  insight:       { fontSize:13, color:T.violet, lineHeight:1.6, marginTop:6, fontStyle:"italic" },
+  primaryAction: { padding:"12px 16px", background:T.amberDim, borderBottom:`1px solid ${T.hair}` },
+  primaryLabel:  { fontSize:9, fontWeight:700, color:T.amber, letterSpacing:1, display:"block", marginBottom:4 },
+  primaryText:   { fontSize:14, color:T.text, lineHeight:1.6, fontWeight:500 },
+  summary:       { padding:"10px 16px", borderBottom:`1px solid ${T.hair}` },
+  summaryText:   { fontSize:13, color:T.muted, lineHeight:1.6, fontStyle:"italic" },
+  tabs:          { display:"flex", borderBottom:`1px solid ${T.hair}` },
+  tab:           { fontSize:12, color:T.muted, background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
+  tabActive:     { color:T.text, borderBottom:`2px solid ${T.amber}` },
   actionPlan:    { padding:"14px 16px", display:"flex", flexDirection:"column", gap:12 },
   actionBlock:   { display:"flex", flexDirection:"column", gap:4 },
-  actionLabel:   { fontSize:11, fontWeight:600, color:"#6b7280" },
-  actionValue:   { fontSize:13, color:"#111827", lineHeight:1.6, whiteSpace:"pre-wrap" },
+  actionLabel:   { fontSize:11, fontWeight:600, color:T.muted },
+  actionValue:   { fontSize:13, color:T.text, lineHeight:1.6, whiteSpace:"pre-wrap" },
   stepList:      { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
-  stepItem:      { fontSize:13, color:"#111827", lineHeight:1.6 },
+  stepItem:      { fontSize:13, color:T.text, lineHeight:1.6 },
   preWrap:       { position:"relative" },
-  copyBtn:       { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:"#fff", background:"#111827", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
-  pre:           { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:"#374151", lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:"#f9fafb" },
+  copyBtn:       { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:T.ink, background:T.amber, border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
+  pre:           { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:T.text, lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:T.panel2 },
 };
 
 const CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #f9fafb; }
-  textarea:focus { border-color: #111827 !important; outline: none; }
+  body { background: ${T.ink}; }
+  textarea:focus { border-color: ${T.amber} !important; outline: none; }
+  ::selection { background: ${T.amberDim}; color: ${T.amber}; }
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(5px); }
     to   { opacity: 1; transform: translateY(0); }
