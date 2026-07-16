@@ -5,16 +5,16 @@ const API = import.meta.env.VITE_API_URL || "http://localhost:3000/api/pipeline"
 // Will be replaced with stored encrypted key after auth is built
 
 export default function App() {
-  const [phase, setPhase]       = useState("idle");       // idle|key|interviewing|running|done|error
+  const [phase, setPhase]       = useState("idle");
   const [messages, setMessages] = useState([]);
-  const [steps, setSteps]       = useState([]);           // live pipeline steps
+  const [steps, setSteps]       = useState([]);
   const [result, setResult]     = useState(null);
   const [input, setInput]       = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [loading, setLoading]   = useState(false);
   const [apiKey, setApiKey]     = useState("");
   const [provider, setProvider] = useState("gemini");
-  const [mode, setMode] = useState(null); // null = auto-detect, "debug" | "general" = explicit
+  const [mode, setMode] = useState(null);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
@@ -24,7 +24,6 @@ export default function App() {
   const addMsg = (role, text) =>
     setMessages(prev => [...prev, { role, text, id: crypto.randomUUID() }]);
 
-  // ── Start interview ──────────────────────────────────────────────────────
   const handleStart = async () => {
     if (!input.trim() || loading) return;
     const raw = input.trim();
@@ -40,9 +39,7 @@ export default function App() {
       setSessionId(data.sessionId);
 
       if (data.status === "complete_syntax_only") {
-        const issueText = data.syntaxIssues
-          .map(issue => `⚠ ${issue.description}`)
-          .join("\n");
+        const issueText = data.syntaxIssues.map(issue => `⚠ ${issue.description}`).join("\n");
         addMsg("bot", `${data.message}\n\n${issueText}`);
         setPhase("idle");
       } else if (data.status === "complete") {
@@ -56,7 +53,6 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
-  // ── Reply to interview question ──────────────────────────────────────────
   const handleReply = async (userDone = false) => {
     if (!input.trim() || loading) return;
     const answer = input.trim();
@@ -70,11 +66,8 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (data.status === "complete") {
-        if (data.resumedFromTieBreak && apiKey.trim()) {
-          runPipeline();
-        } else {
-          setPhase("key");
-        }
+        if (data.resumedFromTieBreak && apiKey.trim()) { runPipeline(); }
+        else { setPhase("key"); }
       } else {
         addMsg("bot", data.question);
       }
@@ -83,48 +76,23 @@ export default function App() {
     } finally { setLoading(false); }
   };
 
-  // ── Run the pipeline via SSE ─────────────────────────────────────────────
   const runPipeline = () => {
     if (!apiKey.trim()) return;
     setPhase("running");
     setSteps([]);
-
     const url = `${API}/run/${sessionId}?provider=${provider}&apiKey=${encodeURIComponent(apiKey)}`;
     const es  = new EventSource(url);
 
     es.onmessage = (e) => {
       const data = JSON.parse(e.data);
-
-      if (data.type === "done") {
-        setResult(data.data);
-        setPhase("done");
-        es.close();
-        return;
-      }
-
-      if (data.type === "error") {
-        addMsg("sys", data.message);
-        setPhase("error");
-        es.close();
-        return;
-      }
-
+      if (data.type === "done") { setResult(data.data); setPhase("done"); es.close(); return; }
+      if (data.type === "error") { addMsg("sys", data.message); setPhase("error"); es.close(); return; }
       if (data.type === "needs_info") {
-        addMsg("bot", data.message);
-        setPhase("interviewing");
-        setSteps([]);
-        es.close();
-        return;
+        addMsg("bot", data.message); setPhase("interviewing"); setSteps([]); es.close(); return;
       }
-
       setSteps(prev => [...prev, data]);
     };
-
-    es.onerror = () => {
-      addMsg("sys", "Connection lost. Try again.");
-      setPhase("error");
-      es.close();
-    };
+    es.onerror = () => { addMsg("sys", "Connection lost. Try again."); setPhase("error"); es.close(); };
   };
 
   const handleKey = (e) => {
@@ -144,137 +112,114 @@ export default function App() {
 
   return (
     <div style={S.shell}>
-      {/* Header */}
-      <header style={S.header}>
+      <nav style={S.nav}>
         <div style={S.brand}>
           <span style={S.mark}>PP</span>
           <span style={S.name}>PromptProxy</span>
         </div>
-        <span style={S.tagline}>We extract. We brief. Your LLM solves it right.</span>
-        {phase === "done" && <button style={S.newBtn} onClick={reset}>New session</button>}
-      </header>
+        <span style={S.tagline}><span style={S.liveDot}></span>diagnostic session</span>
+        {phase === "done" && <button style={S.newBtn} onClick={reset}>new session →</button>}
+      </nav>
 
-      {/* Main */}
       <main style={S.main}>
         <div style={S.col}>
-
-          {/* Empty state */}
-          {messages.length === 0 && phase === "idle" && (
-            <div style={S.empty}>
-              <p style={S.emptyH}>What are you stuck on?</p>
-              <p style={S.emptyB}>
-                Paste your problem, error, or task. We extract the full context,
-                identify the root cause, then send one perfect prompt to your LLM.
-                You get a clear action plan — not a wall of text to decode.
-              </p>
-
-              <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 16 }}>
-                <button
-                  onClick={() => setMode(mode === "debug" ? null : "debug")}
-                  style={{
-                    ...S.pill, cursor: "pointer", border: `1px solid ${T.hair}`,
-                    background: mode === "debug" ? T.amber : "transparent",
-                    color: mode === "debug" ? T.ink : T.muted,
-                  }}
-                >
-                  🐛 Debug mode
-                </button>
-                <button
-                  onClick={() => setMode(mode === "general" ? null : "general")}
-                  style={{
-                    ...S.pill, cursor: "pointer", border: `1px solid ${T.hair}`,
-                    background: mode === "general" ? T.amber : "transparent",
-                    color: mode === "general" ? T.ink : T.muted,
-                  }}
-                >
-                  💬 Ask anything
-                </button>
-              </div>
-
-              <div style={S.pills}>
-                {["Root cause identified","One LLM call","Clear next action","Any domain"].map(p => (
-                  <span key={p} style={S.pill}>{p}</span>
-                ))}
-              </div>
+          <div style={S.terminal}>
+            <div style={S.terminalBar}>
+              <span style={S.dot}></span><span style={S.dot}></span><span style={S.dot}></span>
+              <span style={S.terminalLabel}>{sessionId ? sessionId.slice(0, 8) : "session"}</span>
             </div>
-          )}
 
-          {/* Chat messages */}
-          {messages.map(m => <Bubble key={m.id} msg={m} />)}
+            <div style={S.terminalBody}>
+              {messages.length === 0 && phase === "idle" && steps.length === 0 && !result && (
+                <div style={S.empty}>
+                  <p style={S.emptyPrompt}>$ what are you stuck on?</p>
+                  <p style={S.emptyB}>
+                    Paste your problem, error, or task. We extract the full context,
+                    identify the root cause, then send one perfect prompt to your LLM.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+                    <button
+                      onClick={() => setMode(mode === "debug" ? null : "debug")}
+                      style={{ ...S.modeTag, ...(mode === "debug" ? S.modeTagActive : {}) }}
+                    >
+                      debug mode
+                    </button>
+                    <button
+                      onClick={() => setMode(mode === "general" ? null : "general")}
+                      style={{ ...S.modeTag, ...(mode === "general" ? S.modeTagActive : {}) }}
+                    >
+                      ask anything
+                    </button>
+                  </div>
+                  <div style={S.pills}>
+                    {["root cause identified","one LLM call","clear next action","any domain"].map(p => (
+                      <span key={p} style={S.pill}>{p}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-          {/* Loading dots */}
-          {loading && <ThinkingDots />}
+              {messages.map(m => <Line key={m.id} msg={m} />)}
 
-          {/* Live pipeline steps */}
-          {steps.length > 0 && (
-            <div style={ST.feed}>
-              {steps.map((step, i) => <StepCard key={i} step={step} />)}
+              {loading && <ThinkingLine />}
+
+              {steps.map((step, i) => <StepLine key={i} step={step} />)}
+
+              {phase === "running" && steps.length === 0 && <ThinkingLine label="starting pipeline..." />}
+
+              {result && <ResultBlock result={result} />}
+
+              <div ref={bottomRef} style={{ height: 1 }} />
             </div>
-          )}
-
-          {/* Running indicator */}
-          {phase === "running" && steps.length === 0 && (
-            <div style={ST.feed}><ThinkingDots label="Starting pipeline..." /></div>
-          )}
-
-          {/* Final result */}
-          {result && <ResultCard result={result} />}
-
-          <div ref={bottomRef} style={{ height: 1 }} />
+          </div>
         </div>
       </main>
 
-      {/* Key connection screen */}
       {phase === "key" && (
         <footer style={S.footer}>
           <div style={S.keyBox}>
-            <p style={S.keyTitle}>Connect your LLM to run the pipeline</p>
-            <p style={S.keySub}>Your key is used for this session only. Never logged or stored on our servers.</p>
+            <p style={S.keyTitle}>$ connect your LLM to run this</p>
+            <p style={S.keySub}>your key is used for this session only — never logged or stored</p>
             <div style={S.keyRow}>
               <div style={S.providerToggle}>
-               {["claude","openai","groq","gemini"].map(p => (
-  <button key={p}
-    style={{ ...S.providerBtn, ...(provider === p ? S.providerBtnActive : {}) }}
-    onClick={() => setProvider(p)}>
-    {p === "claude" ? "Claude" : p === "openai" ? "OpenAI" : p === "groq" ? "Groq" : "Gemini"}
-  </button>
-))}
+                {["claude","openai","groq","gemini"].map(p => (
+                  <button key={p}
+                    style={{ ...S.providerBtn, ...(provider === p ? S.providerBtnActive : {}) }}
+                    onClick={() => setProvider(p)}>
+                    {p === "claude" ? "Claude" : p === "openai" ? "OpenAI" : p === "groq" ? "Groq" : "Gemini"}
+                  </button>
+                ))}
               </div>
               <input
                 type="password"
                 style={S.keyInput}
                 placeholder={
-  provider === "claude" ? "sk-ant-..." :
-  provider === "groq"   ? "gsk_..." :
-  provider === "openai" ? "sk-..." :
-  "your Gemini key"
-}
+                  provider === "claude" ? "sk-ant-..." :
+                  provider === "groq"   ? "gsk_..." :
+                  provider === "openai" ? "sk-..." :
+                  "your Gemini key"
+                }
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && runPipeline()}
               />
-              <button style={S.runBtn} onClick={runPipeline} disabled={!apiKey.trim()}>
-                Run →
-              </button>
+              <button style={S.runBtn} onClick={runPipeline} disabled={!apiKey.trim()}>run →</button>
             </div>
           </div>
         </footer>
       )}
 
-      {/* Input bar */}
       {phase !== "done" && phase !== "key" && phase !== "running" && (
         <footer style={S.footer}>
           <div style={S.inputRow}>
+            <span style={S.prompt}>{"›"}</span>
             <textarea
               ref={inputRef}
               style={{ ...S.textarea, opacity: inputDisabled ? 0.4 : 1 }}
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKey}
-              placeholder={
-                phase === "idle" ? "Paste your problem, error, code, or task..." :
-                                   "Your answer..."
-              }
+              placeholder={phase === "idle" ? "paste your problem, error, code, or task..." : "your answer..."}
               disabled={inputDisabled}
               rows={2}
             />
@@ -288,10 +233,8 @@ export default function App() {
           </div>
           {phase === "interviewing" && (
             <div style={S.hintRow}>
-              <span style={S.hint}>Enter to send</span>
-              <button style={S.skipBtn} onClick={() => handleReply(true)}>
-                That's all I have →
-              </button>
+              <span style={S.hint}>enter to send</span>
+              <button style={S.skipBtn} onClick={() => handleReply(true)}>that's all I have →</button>
             </div>
           )}
         </footer>
@@ -302,58 +245,56 @@ export default function App() {
   );
 }
 
-// ── Step card — shown live as pipeline runs ────────────────────────────────────
-function StepCard({ step }) {
-  const icons = {
-  step:               "⚙",
-  status:             "⟳",
-  extraction_done:    "🔍",
-  diagnosis:          "🎯",
-  gate_blocked:       "❓",
-  llm_done:           "⚡",
-  repair_attempt:     "🔧",
-  verification_done:  "🛡",
-  interpretation_done:"✅",
-};
+// ── Terminal line renderers ─────────────────────────────────────────────────
+function Line({ msg }) {
+  if (msg.role === "user") return <p style={L.user}><span style={L.promptChar}>$</span> {msg.text}</p>;
+  if (msg.role === "sys")  return <p style={L.sys}>! {msg.text}</p>;
+  return <p style={L.bot}>{msg.text}</p>;
+}
 
-  const icon = icons[step.type] ?? "·";
-
+function ThinkingLine({ label = "thinking..." }) {
   return (
-    <div style={ST.card}>
-      <span style={ST.icon}>{icon}</span>
-      <div style={ST.content}>
-        <p style={ST.msg}>{step.message}</p>
-        {step.data && step.type === "extraction_done" && (
-          <div style={ST.tags}>
-            {step.data.hypotheses?.[0] && (
-              <Tag label="Top hypothesis" value={`${step.data.hypotheses[0].theory} (${step.data.hypotheses[0].confidence}%)`} />
-            )}
-            <Tag label="Area"       value={step.data.problemArea} />
-            <Tag label="Severity"   value={step.data.severity} color={step.data.severity === "high" ? T.red : step.data.severity === "medium" ? T.amber : T.green} />
-          </div>
-        )}
+    <div style={{ display:"flex", alignItems:"center", gap:8, padding:"4px 0 10px" }}>
+      <div style={{ display:"flex", gap:4 }}>
+        {[0,150,300].map(d => (
+          <span key={d} style={{ width:4, height:4, borderRadius:"50%", background: T.muted,
+            display:"inline-block", animation:`blink 1.2s ${d}ms infinite` }} />
+        ))}
+      </div>
+      <span style={{ fontSize:12, color: T.muted, fontFamily: MONO }}>{label}</span>
+    </div>
+  );
+}
+
+function StepLine({ step }) {
+  const icons = {
+    step: "○", status: "○", extraction_done: "◆", diagnosis: "◆",
+    gate_blocked: "?", llm_done: "◆", repair_attempt: "↻",
+    verification_done: "◆", interpretation_done: "✓",
+  };
+  const icon = icons[step.type] ?? "·";
+  return (
+    <div style={L.stepRow}>
+      <span style={L.stepIcon}>{icon}</span>
+      <div style={{ flex: 1 }}>
+        <p style={L.stepMsg}>{step.message}</p>
         {step.data && step.type === "llm_done" && (
-          <div style={ST.tags}>
-            <Tag label="Model"          value={step.data.model} />
-            <Tag label="Input tokens"   value={step.data.inputTokens} />
-            <Tag label="Output tokens"  value={step.data.outputTokens} />
-          </div>
+          <p style={L.stepTags}>
+            model: {step.data.model} · in: {step.data.inputTokens} · out: {step.data.outputTokens}
+          </p>
+        )}
+        {step.data && step.type === "extraction_done" && (
+          <p style={L.stepTags}>
+            area: {step.data.problemArea} · severity: {step.data.severity}
+          </p>
         )}
       </div>
     </div>
   );
 }
 
-function Tag({ label, value, color }) {
-  return (
-    <span style={{ ...ST.tag, color: color ?? T.muted }}>
-      <span style={ST.tagLabel}>{label}:</span> {value}
-    </span>
-  );
-}
-
-// ── Final result card ──────────────────────────────────────────────────────────
-function ResultCard({ result }) {
+// ── Result block — rendered inline inside the terminal, not a separate card ──
+function ResultBlock({ result }) {
   const {
     interpretation, diagnoses, keyInsight, severity,
     tokensSaved, surgicalPrompt, rawLLMResponse,
@@ -371,146 +312,103 @@ function ResultCard({ result }) {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const severityColor =
-    severity === "high"   ? T.red :
-    severity === "medium" ? T.amber : T.green;
+  const severityColor = severity === "high" ? T.red : severity === "medium" ? T.amber : T.green;
 
   return (
-    <div style={R.card}>
-      <div style={R.header}>
-        <div style={R.headerLeft}>
-          <span style={{ ...R.chip, background: severityColor + "22", color: severityColor }}>
-            {severity} severity
+    <div style={R.wrap}>
+      <div style={R.metaRow}>
+        <span style={{ ...R.chip, color: severityColor, borderColor: severityColor + "44" }}>{severity} severity</span>
+        {tokensSaved > 0 && <span style={{ ...R.chip, color: T.green, borderColor: T.green + "44" }}>~{tokensSaved} tokens saved</span>}
+        {verification?.status && (
+          <span style={{
+            ...R.chip,
+            color: verification.status === "verified" ? T.green : verification.status === "rejected" ? T.red : T.amber,
+            borderColor: (verification.status === "verified" ? T.green : verification.status === "rejected" ? T.red : T.amber) + "44",
+          }}>
+            {verification.status === "verified" ? "syntax & imports OK" : verification.status === "rejected" ? "fix rejected" : "fix unverified"}
           </span>
-          {tokensSaved > 0 && (
-            <span style={{ ...R.chip, background: T.green + "22", color: T.green }}>
-              ~{tokensSaved} tokens saved
-            </span>
-          )}
-          {verification?.status && (
-            <span style={{
-              ...R.chip,
-              background: verification.status === "verified" ? T.green + "22"
-                : verification.status === "rejected" ? T.red + "22" : T.amber + "22",
-              color: verification.status === "verified" ? T.green
-                : verification.status === "rejected" ? T.red : T.amber,
-            }}>
-              {verification.status === "verified" ? "syntax & imports OK"
-                : verification.status === "rejected" ? "fix rejected" : "fix unverified"}
-            </span>
-          )}
-        </div>
+        )}
       </div>
 
       {diagnosisList.map((d, i) => (
         <div key={i} style={R.rootCause}>
-          <span style={R.rootLabel}>
-            {diagnosisList.length > 1 ? `ROOT CAUSE — ISSUE ${i + 1}` : "ROOT CAUSE"}
-          </span>
+          <span style={R.label}>{diagnosisList.length > 1 ? `root cause — issue ${i + 1}` : "root cause"}</span>
           <p style={R.rootText}>{d.theory}</p>
         </div>
       ))}
 
       {interpretation?.confidence != null && (
-  <div style={{ padding: "10px 16px", borderBottom: `1px solid ${T.hair}` }}>
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-      <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 0.5 }}>CONFIDENCE</span>
-      <span style={{
-        fontSize: 13, fontWeight: 600,
-        color: interpretation.confidence >= 75 ? T.green : interpretation.confidence >= 50 ? T.amber : T.red,
-      }}>
-        {interpretation.confidence}%
-      </span>
-    </div>
-    {interpretation.evidence?.length > 0 && (
-      <div style={{ marginBottom: 6 }}>
-        {interpretation.evidence.map((e, i) => (
-          <p key={i} style={{ fontSize: 12, color: T.amber, margin: "2px 0" }}>✓ {e}</p>
-        ))}
-      </div>
-    )}
-    {interpretation.assumptions?.length > 0 && (
-      <div style={{ marginBottom: 6 }}>
-        {interpretation.assumptions.map((a, i) => (
-          <p key={i} style={{ fontSize: 12, color: T.violet, margin: "2px 0" }}>? {a}</p>
-        ))}
-      </div>
-    )}
-    {interpretation.alternative_hypotheses?.length > 0 && (
-      <div>
-        <span style={{ fontSize: 10, color: T.muted, fontWeight: 600, letterSpacing: 0.5 }}>ALTERNATIVES CONSIDERED</span>
-        {interpretation.alternative_hypotheses.map((h, i) => (
-          <p key={i} style={{ fontSize: 12, color: T.muted, margin: "2px 0" }}>
-            {h.theory} ({h.confidence}%)
-          </p>
-        ))}
-      </div>
-    )}
-    {interpretation.evidence_audit_warning && (
-      <p style={{ fontSize: 11, color: T.red, marginTop: 6, fontStyle: "italic" }}>
-        ⚠ {interpretation.evidence_audit_warning}
-      </p>
-    )}
-  </div>
-)}
-
-      {keyInsight && (
-        <div style={{ padding: "0 16px 10px" }}>
-          <p style={R.insight}>💡 {keyInsight}</p>
+        <div style={R.confBlock}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <span style={R.label}>confidence</span>
+            <span style={{
+              fontSize: 13, fontWeight: 600, fontFamily: MONO,
+              color: interpretation.confidence >= 75 ? T.green : interpretation.confidence >= 50 ? T.amber : T.red,
+            }}>
+              {interpretation.confidence}%
+            </span>
+          </div>
+          {interpretation.evidence?.map((e, i) => <p key={i} style={R.evidence}>✓ {e}</p>)}
+          {interpretation.assumptions?.map((a, i) => <p key={i} style={R.assumption}>? {a}</p>)}
+          {interpretation.alternative_hypotheses?.length > 0 && (
+            <div style={{ marginTop: 6 }}>
+              <span style={{ ...R.label, fontSize: 9 }}>alternatives considered</span>
+              {interpretation.alternative_hypotheses.map((h, i) => (
+                <p key={i} style={R.alt}>{h.theory} ({h.confidence}%)</p>
+              ))}
+            </div>
+          )}
+          {interpretation.evidence_audit_warning && (
+            <p style={{ fontSize: 11, color: T.red, marginTop: 6, fontStyle: "italic" }}>⚠ {interpretation.evidence_audit_warning}</p>
+          )}
         </div>
       )}
 
+      {keyInsight && <p style={R.insight}>💡 {keyInsight}</p>}
+
       {interpretation?.primary_action && (
         <div style={R.primaryAction}>
-          <span style={R.primaryLabel}>➡ DO THIS NOW</span>
+          <span style={R.primaryLabel}>do this now</span>
           <p style={R.primaryText}>{interpretation.primary_action}</p>
         </div>
       )}
 
-      {interpretation?.summary && (
-        <div style={R.summary}>
-          <p style={R.summaryText}>{interpretation.summary}</p>
-        </div>
-      )}
+      {interpretation?.summary && <p style={R.summaryText}>{interpretation.summary}</p>}
 
       <div style={R.tabs}>
         {[
-          { id: "action",   label: "Full action plan" },
-          { id: "prompt",   label: "Surgical prompt" },
+          { id: "action",   label: "action plan" },
+          { id: "prompt",   label: "surgical prompt" },
           { id: "response", label: "LLM response" },
         ].map(t => (
-          <button key={t.id}
-            style={{ ...R.tab, ...(tab === t.id ? R.tabActive : {}) }}
-            onClick={() => setTab(t.id)}>{t.label}</button>
+          <button key={t.id} style={{ ...R.tab, ...(tab === t.id ? R.tabActive : {}) }} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
 
       {tab === "action" && interpretation && (
         <div style={R.actionPlan}>
-          {interpretation.output_sections?.map((section, i) => (
-            <DynamicSection key={i} section={section} />
-          ))}
+          {interpretation.output_sections?.map((section, i) => <Section key={i} section={section} />)}
           {(whatToVerify ?? interpretation.what_to_verify) && (
             <div style={R.actionBlock}>
-              <span style={R.actionLabel}>🧪 Verify it worked</span>
+              <span style={R.actionLabel}>verify it worked</span>
               <p style={R.actionValue}>{whatToVerify ?? interpretation.what_to_verify}</p>
             </div>
           )}
           {(potentialRisks ?? interpretation.what_could_go_wrong) && (
-            <div style={{ ...R.actionBlock, background: T.amber + "14", borderRadius:8, padding:"10px 12px" }}>
-              <span style={{ ...R.actionLabel, color: T.amber }}>⚠ Watch out for</span>
+            <div style={{ ...R.actionBlock, borderLeft: `2px solid ${T.amber}`, paddingLeft: 10 }}>
+              <span style={{ ...R.actionLabel, color: T.amber }}>watch out for</span>
               <p style={R.actionValue}>{potentialRisks ?? interpretation.what_could_go_wrong}</p>
             </div>
           )}
           {interpretation.follow_up && (
             <div style={R.actionBlock}>
-              <span style={R.actionLabel}>📌 After this</span>
+              <span style={R.actionLabel}>after this</span>
               <p style={R.actionValue}>{interpretation.follow_up}</p>
             </div>
           )}
           {interpretation.llm_missed && (
-            <div style={{ ...R.actionBlock, background: T.red + "14", borderRadius:8, padding:"10px 12px" }}>
-              <span style={{ ...R.actionLabel, color: T.red }}>⚡ LLM didn't cover</span>
+            <div style={{ ...R.actionBlock, borderLeft: `2px solid ${T.red}`, paddingLeft: 10 }}>
+              <span style={{ ...R.actionLabel, color: T.red }}>LLM didn't cover</span>
               <p style={R.actionValue}>{interpretation.llm_missed}</p>
             </div>
           )}
@@ -519,71 +417,45 @@ function ResultCard({ result }) {
 
       {tab === "prompt" && (
         <div style={R.preWrap}>
-          <button style={R.copyBtn} onClick={() => copy(surgicalPrompt)}>
-            {copied ? "Copied!" : "Copy"}
-          </button>
-          <pre style={R.pre}>
-            {typeof surgicalPrompt === "object"
-              ? JSON.stringify(surgicalPrompt, null, 2)
-              : surgicalPrompt}
-          </pre>
+          <button style={R.copyBtn} onClick={() => copy(surgicalPrompt)}>{copied ? "copied" : "copy"}</button>
+          <pre style={R.pre}>{typeof surgicalPrompt === "object" ? JSON.stringify(surgicalPrompt, null, 2) : surgicalPrompt}</pre>
         </div>
       )}
 
-      {tab === "response" && (
-        <pre style={R.pre}>{rawLLMResponse}</pre>
-      )}
+      {tab === "response" && <pre style={R.pre}>{rawLLMResponse}</pre>}
     </div>
   );
 }
 
-function DynamicSection({ section }) {
+function Section({ section }) {
   if (!section?.content) return null;
-  const typeIcons = { code:"💻", list:"📋", steps:"📝", warning:"⚠", tip:"💡", text:"•" };
-  const icon = typeIcons[section.type] ?? "•";
-
-  const badgeStyle = {
-    verified:   { background: T.green + "22", color: T.green },
-    unverified: { background: T.amber + "22", color: T.amber },
-    rejected:   { background: T.red + "22", color: T.red },
+  const badgeColor = {
+    verified: T.green, unverified: T.amber, rejected: T.red,
   }[section.verification_status];
 
   return (
     <div style={R.actionBlock}>
       <span style={R.actionLabel}>
-        {icon} {section.title}
-        {section.issue_id && (
-          <span style={{ marginLeft: 8, fontSize: 10, color: T.muted, fontWeight: 400 }}>
-            ({section.issue_id.replace("_", " ")})
-          </span>
-        )}
-        {section.verification_status && badgeStyle && (
-          <span style={{
-            marginLeft: 8, fontSize: 10, fontWeight: 600, padding: "2px 6px",
-            borderRadius: 4, ...badgeStyle,
-          }}>
-            {section.verification_status === "verified" ? "✅ syntax & imports OK"
-              : section.verification_status === "rejected" ? "❌ rejected"
-              : "⚠ unverified"}
+        {section.title}
+        {section.issue_id && <span style={{ marginLeft: 8, fontSize: 10, color: T.muted }}>({section.issue_id.replace("_", " ")})</span>}
+        {section.verification_status && badgeColor && (
+          <span style={{ marginLeft: 8, fontSize: 10, color: badgeColor }}>
+            {section.verification_status === "verified" ? "· syntax & imports OK" : section.verification_status === "rejected" ? "· rejected" : "· unverified"}
           </span>
         )}
       </span>
       {section.verification_status === "rejected" && section.verification_note && (
-        <div style={{
-          fontSize: 12, color: T.red, background: T.red + "14",
-          border: `1px solid ${T.red}33`, borderRadius: 6, padding: "6px 10px", marginTop: 4,
-        }}>
-          ⚠ Verifier flagged this: {section.verification_note}
+        <div style={{ fontSize: 12, color: T.red, borderLeft: `2px solid ${T.red}`, paddingLeft: 10, marginTop: 4 }}>
+          verifier flagged: {section.verification_note}
         </div>
       )}
       {section.type === "code" ? (
-        <pre style={{ ...R.pre, marginTop:6, borderRadius:6 }}>{section.content}</pre>
+        <pre style={{ ...R.pre, marginTop: 6 }}>{section.content}</pre>
       ) : section.type === "list" || section.type === "steps" ? (
         <ol style={R.stepList}>
-          {(Array.isArray(section.content)
-            ? section.content
-            : section.content.split("\n").filter(Boolean)
-          ).map((item, i) => <li key={i} style={R.stepItem}>{item}</li>)}
+          {(Array.isArray(section.content) ? section.content : section.content.split("\n").filter(Boolean)).map((item, i) => (
+            <li key={i} style={R.stepItem}>{item}</li>
+          ))}
         </ol>
       ) : (
         <p style={R.actionValue}>{section.content}</p>
@@ -592,57 +464,20 @@ function DynamicSection({ section }) {
   );
 }
 
-// ── Chat bubble ────────────────────────────────────────────────────────────────
-function Bubble({ msg }) {
-  if (msg.role === "user") return (
-    <div style={B.userRow}><div style={B.user}>{msg.text}</div></div>
-  );
-  if (msg.role === "sys") return (
-    <div style={B.sysRow}><span style={B.sys}>{msg.text}</span></div>
-  );
-  return (
-    <div style={B.botRow}>
-      <div style={B.avatar}>PP</div>
-      <div style={B.bot}><p style={B.text}>{msg.text}</p></div>
-    </div>
-  );
-}
-
-function ThinkingDots({ label = "Thinking..." }) {
-  return (
-    <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 0" }}>
-      <div style={{ display:"flex", gap:4 }}>
-        {[0,150,300].map(d => (
-          <span key={d} style={{ width:5, height:5, borderRadius:"50%", background: T.muted,
-            display:"inline-block", animation:`blink 1.2s ${d}ms infinite` }} />
-        ))}
-      </div>
-      <span style={{ fontSize:12, color: T.muted }}>{label}</span>
-    </div>
-  );
-}
-
 const Arrow = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-    <path d="M2 8h12M9 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5"
-      strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M2 8h12M9 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>
 );
 
-// ── Design tokens — mirrors landing.html's palette ──────────────────────────────
+// ── Tokens ───────────────────────────────────────────────────────────────────
 const T = {
-  ink:     "#0B0E14",
-  panel:   "#12161F",
-  panel2:  "#171C27",
-  text:    "#E7E9EE",
-  muted:   "#7C8194",
-  amber:   "#E8A33D",
-  amberDim:"#6B5326",
-  violet:  "#6E7DFF",
-  violetDim:"#333A6B",
-  red:     "#E85B4D",
-  green:   "#4FBE8C",
-  hair:    "rgba(231,233,238,0.09)",
+  ink: "#0B0E14", panel: "#12161F", panel2: "#171C27",
+  text: "#E7E9EE", muted: "#7C8194",
+  amber: "#E8A33D", amberDim: "#6B5326",
+  violet: "#6E7DFF", violetDim: "#333A6B",
+  red: "#E85B4D", green: "#4FBE8C",
+  hair: "rgba(231,233,238,0.09)",
 };
 
 const FONT = "'Inter', system-ui, sans-serif";
@@ -650,86 +485,86 @@ const DISPLAY = "'Space Grotesk', 'Inter', sans-serif";
 const MONO = "'IBM Plex Mono', monospace";
 
 const S = {
-  shell:           { display:"flex", flexDirection:"column", height:"100vh", background:T.ink, fontFamily:FONT, color:T.text },
-  header:          { display:"flex", alignItems:"center", gap:12, padding:"0 28px", height:52, borderBottom:`1px solid ${T.hair}`, background:T.panel, flexShrink:0 },
-  brand:           { display:"flex", alignItems:"center", gap:8 },
-  mark:            { width:26, height:26, background:T.amber, color:T.ink, borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, letterSpacing:0.5, flexShrink:0 },
-  name:            { fontSize:14, fontWeight:600, fontFamily:DISPLAY },
-  tagline:         { fontSize:11, color:T.muted, flex:1 },
-  newBtn:          { fontSize:12, color:T.text, background:"transparent", border:`1px solid ${T.hair}`, borderRadius:6, padding:"5px 12px", cursor:"pointer" },
-  main:            { flex:1, overflowY:"auto", padding:"0 28px" },
-  col:             { maxWidth:660, margin:"0 auto", paddingTop:40, paddingBottom:24 },
-  empty:           { textAlign:"center", paddingTop:60 },
-  emptyH:          { fontSize:22, fontWeight:600, letterSpacing:-0.5, marginBottom:10, fontFamily:DISPLAY, color:T.text },
-  emptyB:          { fontSize:14, color:T.muted, lineHeight:1.7, maxWidth:420, margin:"0 auto 24px" },
-  pills:           { display:"flex", gap:8, flexWrap:"wrap", justifyContent:"center" },
-  pill:            { fontSize:11, color:T.muted, border:`1px solid ${T.hair}`, borderRadius:20, padding:"3px 12px" },
-  footer:          { borderTop:`1px solid ${T.hair}`, background:T.panel, padding:"14px 28px", flexShrink:0 },
-  keyBox:          { maxWidth:660, margin:"0 auto" },
-  keyTitle:        { fontSize:13, fontWeight:500, color:T.text, marginBottom:4 },
-  keySub:          { fontSize:11, color:T.muted, marginBottom:12 },
-  keyRow:          { display:"flex", gap:8, alignItems:"center" },
-  providerToggle:  { display:"flex", border:`1px solid ${T.hair}`, borderRadius:6, overflow:"hidden" },
-  providerBtn:     { padding:"8px 12px", fontSize:12, background:"transparent", border:"none", cursor:"pointer", color:T.muted },
+  shell:        { display:"flex", flexDirection:"column", height:"100vh", background:T.ink, fontFamily:FONT, color:T.text },
+  nav:          { display:"flex", alignItems:"center", gap:12, padding:"14px 28px", borderBottom:`1px solid ${T.hair}`, flexShrink:0 },
+  brand:        { display:"flex", alignItems:"center", gap:8 },
+  mark:         { width:24, height:24, background:T.amber, color:T.ink, borderRadius:5, display:"flex", alignItems:"center", justifyContent:"center", fontSize:9, fontWeight:700, flexShrink:0 },
+  name:         { fontSize:15, fontWeight:600, fontFamily:DISPLAY },
+  tagline:      { fontSize:12, color:T.muted, flex:1, fontFamily:MONO, display:"flex", alignItems:"center", gap:8 },
+  liveDot:      { width:6, height:6, borderRadius:"50%", background:T.amber, display:"inline-block" },
+  newBtn:       { fontSize:12, color:T.text, background:"transparent", border:`1px solid ${T.hair}`, borderRadius:6, padding:"6px 12px", cursor:"pointer", fontFamily:MONO },
+  main:         { flex:1, overflowY:"auto", padding:"24px 28px" },
+  col:          { maxWidth:720, margin:"0 auto" },
+  terminal:     { background:T.panel, border:`1px solid ${T.hair}`, borderRadius:10, minHeight:"calc(100vh - 210px)", display:"flex", flexDirection:"column" },
+  terminalBar:  { display:"flex", alignItems:"center", gap:8, padding:"12px 16px", background:T.panel2, borderBottom:`1px solid ${T.hair}`, borderRadius:"10px 10px 0 0" },
+  dot:          { width:9, height:9, borderRadius:"50%", background:T.hair },
+  terminalLabel:{ marginLeft:8, fontFamily:MONO, fontSize:11, color:T.muted },
+  terminalBody: { padding:20, flex:1, fontFamily:FONT },
+  empty:        { padding:"12px 0" },
+  emptyPrompt:  { fontFamily:MONO, fontSize:16, color:T.text, marginBottom:10 },
+  emptyB:       { fontSize:13, color:T.muted, lineHeight:1.7, maxWidth:460, marginBottom:18 },
+  modeTag:      { fontFamily:MONO, fontSize:11, color:T.muted, background:"transparent", border:`1px solid ${T.hair}`, borderRadius:5, padding:"5px 10px", cursor:"pointer" },
+  modeTagActive:{ background:T.amber, color:T.ink, borderColor:T.amber },
+  pills:        { display:"flex", gap:6, flexWrap:"wrap" },
+  pill:         { fontFamily:MONO, fontSize:10, color:T.muted, border:`1px solid ${T.hair}`, borderRadius:5, padding:"3px 8px" },
+  footer:       { borderTop:`1px solid ${T.hair}`, padding:"14px 28px", flexShrink:0 },
+  keyBox:       { maxWidth:720, margin:"0 auto" },
+  keyTitle:     { fontSize:14, fontFamily:MONO, color:T.text, marginBottom:4 },
+  keySub:       { fontSize:11, color:T.muted, marginBottom:12, fontFamily:MONO },
+  keyRow:       { display:"flex", gap:8, alignItems:"center" },
+  providerToggle:{ display:"flex", border:`1px solid ${T.hair}`, borderRadius:6, overflow:"hidden" },
+  providerBtn:  { padding:"8px 12px", fontSize:11, background:"transparent", border:"none", cursor:"pointer", color:T.muted, fontFamily:MONO },
   providerBtnActive:{ background:T.amber, color:T.ink, fontWeight:500 },
-  keyInput:        { flex:1, padding:"8px 12px", fontSize:12, border:`1px solid ${T.hair}`, borderRadius:6, outline:"none", fontFamily:MONO, background:T.panel2, color:T.text },
-  runBtn:          { background:T.amber, color:T.ink, border:"none", borderRadius:6, padding:"8px 20px", fontSize:13, fontWeight:600, cursor:"pointer" },
-  inputRow:        { maxWidth:660, margin:"0 auto", display:"flex", gap:8, alignItems:"flex-end" },
-  textarea:        { flex:1, resize:"none", border:`1px solid ${T.hair}`, borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:T.text, background:T.panel2, outline:"none", lineHeight:1.5 },
-  sendBtn:         { width:38, height:38, background:T.amber, color:T.ink, border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
-  hintRow:         { maxWidth:660, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
-  hint:            { fontSize:11, color:T.muted },
-  skipBtn:         { fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", textDecoration:"underline" },
+  keyInput:     { flex:1, padding:"9px 12px", fontSize:12, border:`1px solid ${T.hair}`, borderRadius:6, outline:"none", fontFamily:MONO, background:T.panel2, color:T.text },
+  runBtn:       { background:T.amber, color:T.ink, border:"none", borderRadius:6, padding:"9px 20px", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:MONO },
+  inputRow:     { maxWidth:720, margin:"0 auto", display:"flex", gap:10, alignItems:"flex-start" },
+  prompt:       { fontFamily:MONO, color:T.amber, fontSize:16, paddingTop:10 },
+  textarea:     { flex:1, resize:"none", border:`1px solid ${T.hair}`, borderRadius:8, padding:"10px 14px", fontSize:14, fontFamily:FONT, color:T.text, background:T.panel, outline:"none", lineHeight:1.5 },
+  sendBtn:      { width:38, height:38, background:T.amber, color:T.ink, border:"none", borderRadius:8, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 },
+  hintRow:      { maxWidth:720, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
+  hint:         { fontSize:11, color:T.muted, fontFamily:MONO },
+  skipBtn:      { fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
 };
 
-const B = {
-  userRow: { display:"flex", justifyContent:"flex-end", marginBottom:14 },
-  user:    { background:T.panel2, color:T.text, border:`1px solid ${T.hair}`, borderRadius:"12px 12px 2px 12px", padding:"10px 16px", fontSize:14, lineHeight:1.6, maxWidth:480 },
-  botRow:  { display:"flex", gap:10, marginBottom:14, alignItems:"flex-start" },
-  avatar:  { width:26, height:26, background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, fontWeight:700, color:T.muted, marginTop:2 },
-  bot:     { background:T.panel, border:`1px solid ${T.hair}`, borderRadius:"2px 12px 12px 12px", padding:"10px 14px", maxWidth:500 },
-  text:    { margin:0, fontSize:14, lineHeight:1.7, color:T.text },
-  sysRow:  { display:"flex", justifyContent:"center", marginBottom:10 },
-  sys:     { fontSize:11, color:T.muted, background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:20, padding:"3px 12px" },
-};
-
-const ST = {
-  feed:     { display:"flex", flexDirection:"column", gap:8, marginBottom:16 },
-  card:     { display:"flex", gap:10, padding:"10px 14px", background:T.panel, border:`1px solid ${T.hair}`, borderRadius:8, animation:"fadeUp 0.2s ease" },
-  icon:     { fontSize:14, flexShrink:0, marginTop:1 },
-  content:  { flex:1 },
-  msg:      { fontSize:13, color:T.text, marginBottom:4 },
-  tags:     { display:"flex", gap:12, flexWrap:"wrap" },
-  tag:      { fontSize:11 },
-  tagLabel: { color:T.muted },
+const L = {
+  user:      { fontSize:14, color:T.text, marginBottom:12, lineHeight:1.6 },
+  promptChar:{ color:T.amber, fontFamily:MONO },
+  bot:       { fontSize:14, color:T.text, marginBottom:12, lineHeight:1.7, paddingLeft:14, borderLeft:`2px solid ${T.hair}` },
+  sys:       { fontSize:12, color:T.muted, marginBottom:10, fontFamily:MONO, fontStyle:"italic" },
+  stepRow:   { display:"flex", gap:10, marginBottom:8, fontSize:13 },
+  stepIcon:  { color:T.amber, fontFamily:MONO, fontSize:12, marginTop:2 },
+  stepMsg:   { color:T.text, marginBottom:2 },
+  stepTags:  { fontSize:11, color:T.muted, fontFamily:MONO },
 };
 
 const R = {
-  card:          { background:T.panel, border:`1px solid ${T.hair}`, borderRadius:12, overflow:"hidden", marginBottom:16, animation:"fadeUp 0.3s ease" },
-  header:        { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", borderBottom:`1px solid ${T.hair}` },
-  headerLeft:    { display:"flex", gap:8, flexWrap:"wrap" },
-  chip:          { fontSize:11, fontWeight:500, padding:"3px 10px", borderRadius:20 },
-  rootCause:     { padding:"14px 16px", borderBottom:`1px solid ${T.hair}`, background:T.panel2 },
-  rootLabel:     { fontSize:9, fontWeight:700, color:T.muted, letterSpacing:1, display:"block", marginBottom:4 },
-  rootText:      { fontSize:14, color:T.text, lineHeight:1.6 },
-  insight:       { fontSize:13, color:T.violet, lineHeight:1.6, marginTop:6, fontStyle:"italic" },
-  primaryAction: { padding:"12px 16px", background:T.amberDim, borderBottom:`1px solid ${T.hair}` },
-  primaryLabel:  { fontSize:9, fontWeight:700, color:T.amber, letterSpacing:1, display:"block", marginBottom:4 },
-  primaryText:   { fontSize:14, color:T.text, lineHeight:1.6, fontWeight:500 },
-  summary:       { padding:"10px 16px", borderBottom:`1px solid ${T.hair}` },
-  summaryText:   { fontSize:13, color:T.muted, lineHeight:1.6, fontStyle:"italic" },
-  tabs:          { display:"flex", borderBottom:`1px solid ${T.hair}` },
-  tab:           { fontSize:12, color:T.muted, background:"none", border:"none", borderBottom:"2px solid transparent", padding:"10px 16px", cursor:"pointer" },
-  tabActive:     { color:T.text, borderBottom:`2px solid ${T.amber}` },
-  actionPlan:    { padding:"14px 16px", display:"flex", flexDirection:"column", gap:12 },
-  actionBlock:   { display:"flex", flexDirection:"column", gap:4 },
-  actionLabel:   { fontSize:11, fontWeight:600, color:T.muted },
-  actionValue:   { fontSize:13, color:T.text, lineHeight:1.6, whiteSpace:"pre-wrap" },
-  stepList:      { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
-  stepItem:      { fontSize:13, color:T.text, lineHeight:1.6 },
-  preWrap:       { position:"relative" },
-  copyBtn:       { position:"absolute", top:10, right:10, fontSize:11, fontWeight:500, color:T.ink, background:T.amber, border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer" },
-  pre:           { margin:0, padding:"16px", fontSize:12, fontFamily:MONO, color:T.text, lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:T.panel2 },
+  wrap:        { marginTop:8, marginBottom:16, borderTop:`1px solid ${T.hair}`, paddingTop:16 },
+  metaRow:      { display:"flex", gap:8, flexWrap:"wrap", marginBottom:16 },
+  chip:         { fontSize:11, fontFamily:MONO, padding:"3px 10px", borderRadius:20, border:"1px solid" },
+  rootCause:    { marginBottom:16 },
+  label:        { fontSize:10, fontFamily:MONO, color:T.muted, letterSpacing:0.5, textTransform:"uppercase" },
+  rootText:     { fontSize:15, color:T.text, lineHeight:1.6, marginTop:6 },
+  confBlock:    { background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:8, padding:"12px 14px", marginBottom:16 },
+  evidence:     { fontSize:12, color:T.amber, margin:"3px 0", fontFamily:MONO },
+  assumption:   { fontSize:12, color:T.violet, margin:"3px 0", fontFamily:MONO },
+  alt:          { fontSize:12, color:T.muted, margin:"2px 0" },
+  insight:      { fontSize:13, color:T.violet, lineHeight:1.6, marginBottom:12, fontStyle:"italic" },
+  primaryAction:{ background:T.amberDim, borderRadius:8, padding:"12px 14px", marginBottom:16 },
+  primaryLabel: { fontSize:10, fontFamily:MONO, color:T.amber, letterSpacing:0.5, textTransform:"uppercase", display:"block", marginBottom:4 },
+  primaryText:  { fontSize:14, color:T.text, lineHeight:1.6, fontWeight:500 },
+  summaryText:  { fontSize:13, color:T.muted, lineHeight:1.6, marginBottom:16, fontStyle:"italic" },
+  tabs:         { display:"flex", gap:4, borderBottom:`1px solid ${T.hair}`, marginBottom:16 },
+  tab:          { fontSize:11, fontFamily:MONO, color:T.muted, background:"none", border:"none", borderBottom:"2px solid transparent", padding:"8px 12px", cursor:"pointer" },
+  tabActive:    { color:T.text, borderBottom:`2px solid ${T.amber}` },
+  actionPlan:   { display:"flex", flexDirection:"column", gap:14 },
+  actionBlock:  { display:"flex", flexDirection:"column", gap:4 },
+  actionLabel:  { fontSize:11, fontFamily:MONO, color:T.muted, textTransform:"uppercase", letterSpacing:0.3 },
+  actionValue:  { fontSize:13, color:T.text, lineHeight:1.6, whiteSpace:"pre-wrap" },
+  stepList:     { paddingLeft:18, display:"flex", flexDirection:"column", gap:4 },
+  stepItem:     { fontSize:13, color:T.text, lineHeight:1.6 },
+  preWrap:      { position:"relative" },
+  copyBtn:      { position:"absolute", top:10, right:10, fontSize:11, color:T.ink, background:T.amber, border:"none", borderRadius:5, padding:"4px 10px", cursor:"pointer", fontFamily:MONO },
+  pre:          { margin:0, padding:14, fontSize:12, fontFamily:MONO, color:T.text, lineHeight:1.7, whiteSpace:"pre-wrap", overflowX:"auto", background:T.panel2, borderRadius:6, border:`1px solid ${T.hair}` },
 };
 
 const CSS = `
@@ -738,12 +573,5 @@ const CSS = `
   body { background: ${T.ink}; }
   textarea:focus { border-color: ${T.amber} !important; outline: none; }
   ::selection { background: ${T.amberDim}; color: ${T.amber}; }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(5px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  @keyframes blink {
-    0%, 80%, 100% { opacity: 0.15; transform: scale(0.8); }
-    40%           { opacity: 1;    transform: scale(1); }
-  }
+  @keyframes blink { 0%, 80%, 100% { opacity: 0.15; } 40% { opacity: 1; } }
 `;
