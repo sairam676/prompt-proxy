@@ -17,6 +17,7 @@ export default function App() {
   const [mode, setMode] = useState(null);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
+  const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps, result]);
   useEffect(() => { if (!loading) inputRef.current?.focus(); }, [loading, phase]);
@@ -179,7 +180,23 @@ export default function App() {
         <footer style={S.footer}>
           <div style={S.keyBox}>
             <p style={S.keyTitle}>$ connect your LLM to run this</p>
-            <p style={S.keySub}>your key is used for this session only — never logged or stored</p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+  <p style={S.keySub}>your key is used for this session only — never logged or stored</p>
+  <button onClick={() => setShowHelp(!showHelp)} style={S.helpToggle}>
+    {showHelp ? "hide" : "don't have a key? →"}
+  </button>
+</div>
+{showHelp && (
+  <div style={S.helpBox}>
+    <p style={S.helpTitle}>getting a {provider} key:</p>
+    <ol style={S.helpList}>
+      {KEY_HELP[provider].steps.map((s, i) => <li key={i} style={S.helpItem}>{s}</li>)}
+    </ol>
+    <a href={KEY_HELP[provider].url} target="_blank" rel="noopener noreferrer" style={S.helpLink}>
+      open {provider === "claude" ? "console.anthropic.com" : provider === "openai" ? "platform.openai.com" : provider === "gemini" ? "aistudio.google.com" : "console.groq.com"} →
+    </a>
+  </div>
+)}
             <div style={S.keyRow}>
               <div style={S.providerToggle}>
                 {["claude","openai","groq","gemini"].map(p => (
@@ -480,6 +497,14 @@ const T = {
   hair: "rgba(231,233,238,0.09)",
 };
 
+//key help
+const KEY_HELP = {
+  claude: { steps: ["Go to console.anthropic.com", "Sign up or log in", "Click 'API Keys' → 'Create Key'", "Copy it and paste below"], url: "https://console.anthropic.com/settings/keys" },
+  openai: { steps: ["Go to platform.openai.com", "Sign up or log in", "Click 'API keys' → 'Create new secret key'", "Copy it and paste below"], url: "https://platform.openai.com/api-keys" },
+  gemini: { steps: ["Go to aistudio.google.com", "Sign in with your Google account", "Click 'Get API key' → 'Create API key'", "Copy it and paste below"], url: "https://aistudio.google.com/apikey" },
+  groq: { steps: ["Go to console.groq.com", "Sign up or log in", "Click 'API Keys' → 'Create API Key'", "Copy it and paste below"], url: "https://console.groq.com/keys" },
+};
+
 const FONT = "'Inter', system-ui, sans-serif";
 const DISPLAY = "'Space Grotesk', 'Inter', sans-serif";
 const MONO = "'IBM Plex Mono', monospace";
@@ -524,6 +549,12 @@ const S = {
   hintRow:      { maxWidth:720, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
   hint:         { fontSize:11, color:T.muted, fontFamily:MONO },
   skipBtn:      { fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
+  helpToggle: { fontSize:11, color:T.amber, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
+  helpBox:    { marginTop:10, padding:"12px 14px", background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:8 },
+  helpTitle:  { fontSize:12, color:T.text, fontFamily:MONO, marginBottom:8 },
+  helpList:   { paddingLeft:18, marginBottom:10 },
+  helpItem:   { fontSize:12, color:T.muted, lineHeight:1.8 },
+  helpLink:   { fontSize:11, color:T.amber, fontFamily:MONO, textDecoration:"underline" },
 };
 
 const L = {
