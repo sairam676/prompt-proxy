@@ -17,7 +17,10 @@ import { runPipeline } from "../pipeline/runner.js";
 import { v4 as uuidv4 } from "uuid";
 import { verifySyntax } from "../pipeline/syntaxVerifier.js";
 import { classifyTaskType } from "../pipeline/taskRouter.js";
+import multer from "multer";
+import { extractZipForSession, listFiles } from "../pipeline/fileContext.js";
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const router = express.Router();
 
 
@@ -151,6 +154,24 @@ router.post("/reply", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+
+//--POST /api/pipeline/upload-zip ────────────────────────────────────────────────
+router.post("/upload-context", upload.single("zip"), async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId || !req.file) return res.status(400).json({ error: "sessionId and zip file required" });
+
+    extractZipForSession(sessionId, req.file.buffer);
+    const files = listFiles(sessionId);
+
+    return res.json({ status: "ok", fileCount: files.length, files: files.slice(0, 50) });
+  } catch (err) {
+    console.error("[/upload-context]", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 // ── GET /api/pipeline/run/:sessionId ─────────────────────────────────────────
 // SSE endpoint — streams pipeline steps live to the frontend

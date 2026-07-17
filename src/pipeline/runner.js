@@ -25,7 +25,7 @@ import OpenAI    from "openai";
 import Groq      from "groq-sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt, buildRepairPrompt } from "./extractor.js";
-
+import { readSessionFile, listFiles } from "./fileContext.js";
 import { verifyFix }         from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
 
@@ -33,7 +33,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const MAX_REPAIR_ATTEMPTS = 1; // one automatic re-call on a rejected fix, capped for cost predictability
 
 // ── Call user's LLM ─────────────────────────────────────────────────────────
-const callUserLLM = async (provider, apiKey, promptText, complexity, onStep) => {
+const callUserLLM = async (provider, apiKey, promptText, complexity, sessionId, onStep) => {
   onStep({
     type:    "status",
     message: `Sending to your ${
@@ -99,6 +99,11 @@ Be as detailed as the task requires — do not truncate important information.`;
   }
 
   if (provider === "gemini") {
+    // If the session has an uploaded zip with files, route through the
+    // agentic tool-use path instead of a plain one-shot call.
+    if (sessionId && listFiles(sessionId).length > 0) {
+      return await callGeminiWithTools(apiKey, promptText, sessionId, complexity, onStep);
+    }
     const genAI = new GoogleGenerativeAI(apiKey);
     const modelName = complexity === "complex" ? "gemini-pro-latest" : "gemini-flash-latest";
     const model = genAI.getGenerativeModel({
@@ -123,6 +128,59 @@ Be as detailed as the task requires — do not truncate important information.`;
   }
 
   throw new Error(`Unsupported provider: ${provider}`);
+};
+
+// ── Gemini tool-use (agentic slice) ─────────────────────────────────────────
+const READ_FILE_TOOL = {
+  functionDeclarations: [{
+    name: "read_file",
+    description: "Read the contents of a file from the user's uploaded project.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Relative path to the file, from the list_files result." },
+      },
+      required: ["path"],
+    },
+  }, {
+    name: "list_files",
+    description: "List all files available in the user's uploaded project.",
+    parameters: { type: "object", properties: {} },
+  }],
+};
+
+const MAX_TOOL_TURNS = 5;
+
+export const callGeminiWithTools = async (apiKey, promptText, sessionId, complexity, onStep) => {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const modelName = complexity === "complex" ? "gemini-pro-latest" : "gemini-flash-latest";
+  const model = genAI.getGenerativeModel({ model: modelName, tools: [READ_FILE_TOOL] });
+
+  const chat = model.startChat();
+  let response = await chat.sendMessage(promptText);
+  let turns = 0;
+
+  while (turns < MAX_TOOL_TURNS) {
+    const functionCalls = response.response.functionCalls();
+    if (!functionCalls || functionCalls.length === 0) break;
+
+    turns += 1;
+    const call = functionCalls[0];
+    onStep({ type: "tool_call", message: `Reading ${call.args.path ?? "file list"}...`, data: call });
+
+    let toolResult;
+    if (call.name === "read_file") {
+      toolResult = readSessionFile(sessionId, call.args.path);
+    } else if (call.name === "list_files") {
+      toolResult = { files: listFiles(sessionId) };
+    }
+
+    response = await chat.sendMessage([{
+      functionResponse: { name: call.name, response: toolResult },
+    }]);
+  }
+
+  return response.response.text();
 };
 
 const isDebuggingTask = (ctx) => {
