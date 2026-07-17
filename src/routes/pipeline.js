@@ -107,6 +107,25 @@ router.post("/reply", async (req, res) => {
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
+      // If a project zip is attached and we're not already past the
+    // interview, skip the interviewer entirely — it has no way to know
+    // files exist and will otherwise loop asking for pasted code forever.
+    if (session.hasAttachedFiles && session.status !== "complete") {
+      session.structuredContext = {
+        goal: message?.trim() || session.history?.[0]?.content || "debug the attached project",
+        existing_context: `Project files attached via zip upload: ${session.attachedFileList?.join(", ") ?? "see attached files"}. Use read_file/list_files to inspect them.`,
+        already_tried: null,
+        expected_output: null,
+        constraints: null,
+        domain: null,
+        raw_intent: message?.trim() || session.history?.[0]?.content || "",
+        complexity: "medium",
+      };
+      session.status = "complete";
+      await saveSession(sessionId, session);
+      return res.json({ sessionId, status: "complete" });
+    }
+    
    if (session.awaitingTieBreak) {
   const ctx = session.structuredContext ?? {};
   ctx.existing_context = ctx.existing_context
@@ -164,6 +183,16 @@ router.post("/upload-context", upload.single("zip"), async (req, res) => {
 
     extractZipForSession(sessionId, req.file.buffer);
     const files = listFiles(sessionId);
+
+    // Mark the session so /reply knows a project was attached — the
+    // interviewer has no visibility into this upload otherwise, and would
+    // keep asking for pasted code it'll never get.
+    const session = await getSession(sessionId);
+    if (session) {
+      session.hasAttachedFiles = true;
+      session.attachedFileList = files;
+      await saveSession(sessionId, session);
+    }
 
     return res.json({ status: "ok", fileCount: files.length, files: files.slice(0, 50) });
   } catch (err) {
