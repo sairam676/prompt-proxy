@@ -1,12 +1,12 @@
 /**
  * pipeline.js
- * 
+ *
  * SSE endpoint — streams each pipeline step to the frontend in real time.
  * User sees exactly what's happening as it happens.
- * 
+ *
  * POST /api/pipeline/run
  * Body: { sessionId, provider, apiKey }
- * 
+ *
  * For testing: if no apiKey provided, falls back to TEST_LLM_KEY from .env
  */
 
@@ -23,27 +23,42 @@ import { extractZipForSession, listFiles } from "../pipeline/fileContext.js";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const router = express.Router();
 
-
+/**
+ * buildAttachedFilesContext — used whenever a session has files attached
+ * via zip upload. Skips the interviewer entirely: the interviewer has no
+ * visibility into /upload-context, so leaving it in the loop means it
+ * keeps asking the user to paste code that will never come. This builds a
+ * minimal structuredContext directly and marks the session complete.
+ */
+const buildAttachedFilesContext = (session, message) => ({
+  goal: message?.trim() || session.history?.[0]?.content || "debug the attached project",
+  existing_context: `Project files attached via zip upload: ${
+    session.attachedFileList?.join(", ") ?? "see attached files"
+  }. Use read_file/list_files to inspect them before diagnosing.`,
+  already_tried: null,
+  expected_output: null,
+  constraints: null,
+  domain: null,
+  raw_intent: message?.trim() || session.history?.[0]?.content || "",
+  complexity: "medium",
+});
 
 // ── POST /api/pipeline/start ──────────────────────────────────────────────────
-// Start interview — same as before
 router.post("/start", async (req, res) => {
   try {
     const { message, mode } = req.body;
     if (!message?.trim()) return res.status(400).json({ error: "message is required" });
 
-    // Deterministic pre-check: if the pasted message contains a code block
-    // with a syntax error, that IS the bug — skip the interview and LLM
-    // round-trip entirely, just tell the user directly.
-  const sessionId = uuidv4();
+    const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
-    const taskType =await  classifyTaskType(message, mode);
+    const taskType = await classifyTaskType(message, mode);
     session.taskType = taskType;
 
-    // Syntax pre-check only makes sense for debug tasks — running it on a
-    // general/conceptual question risks false-positiving on ordinary
-    // English (apostrophes read as unterminated strings, etc.) since
-    // there's no real code to isolate in the first place.
+    // Deterministic pre-check: only for explicitly fenced (```) code
+    // blocks. Raw unfenced text is NOT guessed at — that heuristic kept
+    // false-positiving on ordinary English (apostrophes, the word
+    // "function" used as a noun, prose mixed with code). Fenced blocks are
+    // an unambiguous signal the user intentionally marked as code.
     if (taskType === "debug") {
       const syntaxCheck = verifySyntax(message);
       if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
@@ -57,8 +72,7 @@ router.post("/start", async (req, res) => {
     }
 
     // General/conceptual questions skip the interview entirely — there's
-    // no code to gather context on, no error to reproduce. Build minimal
-    // context directly and go straight to "complete".
+    // no code to gather context on, no error to reproduce.
     if (taskType === "general") {
       session.structuredContext = {
         goal: message.trim(),
@@ -107,41 +121,34 @@ router.post("/reply", async (req, res) => {
     const session = await getSession(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-      // If a project zip is attached and we're not already past the
-    // interview, skip the interviewer entirely — it has no way to know
-    // files exist and will otherwise loop asking for pasted code forever.
+    // If a project zip is attached and we're not already past the
+    // interview, skip the interviewer entirely — see buildAttachedFilesContext.
     if (session.hasAttachedFiles && session.status !== "complete") {
-      session.structuredContext = {
-        goal: message?.trim() || session.history?.[0]?.content || "debug the attached project",
-        existing_context: `Project files attached via zip upload: ${session.attachedFileList?.join(", ") ?? "see attached files"}. Use read_file/list_files to inspect them.`,
-        already_tried: null,
-        expected_output: null,
-        constraints: null,
-        domain: null,
-        raw_intent: message?.trim() || session.history?.[0]?.content || "",
-        complexity: "medium",
-      };
+      session.structuredContext = buildAttachedFilesContext(session, message);
       session.status = "complete";
       await saveSession(sessionId, session);
       return res.json({ sessionId, status: "complete" });
     }
-    
-   if (session.awaitingTieBreak) {
-  const ctx = session.structuredContext ?? {};
-  ctx.existing_context = ctx.existing_context
-    ? `${ctx.existing_context}\n\n[CONFIRMED BY USER]: ${message}`
-    : `[CONFIRMED BY USER]: ${message}`;
-  ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
 
-  session.structuredContext = ctx;
-  session.status             = "complete";
-  session.awaitingTieBreak   = false;
-  session.tieBreakQuestion   = null;
-  await saveSession(sessionId, session);
+    // Clarification answer: the real LLM (not a cheap pre-filter) said it
+    // needed more info to diagnose confidently and asked a specific
+    // question. Fold the answer into existing_context, tagged as
+    // confirmed — never re-hedged as an assumption on a later pass.
+    if (session.awaitingTieBreak) {
+      const ctx = session.structuredContext ?? {};
+      ctx.existing_context = ctx.existing_context
+        ? `${ctx.existing_context}\n\n[CONFIRMED BY USER]: ${message}`
+        : `[CONFIRMED BY USER]: ${message}`;
+      ctx.raw_intent = `${ctx.raw_intent ?? ""}\n\n${message}`;
 
-  return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
-}
+      session.structuredContext = ctx;
+      session.status             = "complete";
+      session.awaitingTieBreak   = false;
+      session.tieBreakQuestion   = null;
+      await saveSession(sessionId, session);
 
+      return res.json({ sessionId, status: "complete", resumedFromTieBreak: true });
+    }
 
     if (userDone) {
       const context = await forceExtractContext(session.history);
@@ -174,8 +181,7 @@ router.post("/reply", async (req, res) => {
   }
 });
 
-
-//--POST /api/pipeline/upload-zip ────────────────────────────────────────────────
+// ── POST /api/pipeline/upload-context ─────────────────────────────────────────
 router.post("/upload-context", upload.single("zip"), async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -184,9 +190,9 @@ router.post("/upload-context", upload.single("zip"), async (req, res) => {
     extractZipForSession(sessionId, req.file.buffer);
     const files = listFiles(sessionId);
 
-    // Mark the session so /reply knows a project was attached — the
-    // interviewer has no visibility into this upload otherwise, and would
-    // keep asking for pasted code it'll never get.
+    // Mark the session so /reply and /start know a project was attached —
+    // the interviewer otherwise has zero visibility into this upload and
+    // would keep asking for pasted code that will never come.
     const session = await getSession(sessionId);
     if (session) {
       session.hasAttachedFiles = true;
@@ -201,19 +207,17 @@ router.post("/upload-context", upload.single("zip"), async (req, res) => {
   }
 });
 
-
 // ── GET /api/pipeline/run/:sessionId ─────────────────────────────────────────
 // SSE endpoint — streams pipeline steps live to the frontend
 router.get("/run/:sessionId", async (req, res) => {
   const { sessionId } = req.params;
-  const provider = req.query.provider ?? process.env.TEST_LLM_PROVIDER ?? "openai";
+  const provider = req.query.provider ?? process.env.TEST_LLM_PROVIDER ?? "gemini";
   const apiKey   = req.query.apiKey   ?? process.env.TEST_LLM_KEY;
 
   if (!apiKey) {
     return res.status(400).json({ error: "No API key provided" });
   }
 
-  // Set up SSE
   res.setHeader("Content-Type",  "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection",    "keep-alive");
@@ -237,10 +241,9 @@ router.get("/run/:sessionId", async (req, res) => {
 
     const result = await runPipeline(session.structuredContext, provider, apiKey, sessionId, send);
 
-    // ── Real LLM said it needs clarification — hand the question back to
-    // the frontend as "needs_info" (App.jsx already listens for this exact
-    // type). No hypothesis state to persist anymore — the next answer just
-    // enriches the context for a fresh call.
+    // Real LLM said it needs clarification — hand the question back to the
+    // frontend as "needs_info". No hypothesis state to persist — the next
+    // answer just enriches the context for a fresh call.
     if (result?.blocked && result.reason === "needs_clarification") {
       session.status           = "interviewing";
       session.awaitingTieBreak = true;
