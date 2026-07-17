@@ -206,7 +206,7 @@ router.get("/run/:sessionId", async (req, res) => {
       return res.end();
     }
 
-    const result = await runPipeline(session.structuredContext, provider, apiKey, send);
+    const result = await runPipeline(session.structuredContext, provider, apiKey, sessionId, send);
 
     // ── Real LLM said it needs clarification — hand the question back to
     // the frontend as "needs_info" (App.jsx already listens for this exact

@@ -18,6 +18,7 @@ export default function App() {
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [uploadedFileCount, setUploadedFileCount] = useState(0);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, steps, result]);
   useEffect(() => { if (!loading) inputRef.current?.focus(); }, [loading, phase]);
@@ -52,6 +53,22 @@ export default function App() {
     } catch (e) {
       addMsg("sys", e.message); setPhase("error");
     } finally { setLoading(false); }
+  };
+
+  const handleZipUpload = async (file) => {
+    if (!file || !sessionId) return;
+    const formData = new FormData();
+    formData.append("zip", file);
+    formData.append("sessionId", sessionId);
+    try {
+      const res = await fetch(`${API}/upload-context`, { method: "POST", body: formData });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setUploadedFileCount(data.fileCount);
+      addMsg("sys", `Attached ${data.fileCount} files from your project.`);
+    } catch (e) {
+      addMsg("sys", `Upload failed: ${e.message}`);
+    }
   };
 
   const handleReply = async (userDone = false) => {
@@ -106,7 +123,7 @@ export default function App() {
 
   const reset = () => {
     setPhase("idle"); setMessages([]); setSteps([]);
-    setInput(""); setSessionId(null); setResult(null);
+    setInput(""); setSessionId(null); setResult(null); setUploadedFileCount(0);
   };
 
   const inputDisabled = loading || phase === "running" || phase === "done" || phase === "key";
@@ -176,27 +193,42 @@ export default function App() {
         </div>
       </main>
 
+      {/* Attach project files — visible once a session exists, before the run kicks off */}
+      {sessionId && (phase === "interviewing" || phase === "key") && (
+        <div style={S.attachRow}>
+          <label style={S.attachLabel}>
+            📎 {uploadedFileCount > 0 ? `${uploadedFileCount} files attached — reasoning can read them` : "attach project (.zip) for multi-file context"}
+            <input
+              type="file"
+              accept=".zip"
+              style={{ display: "none" }}
+              onChange={e => handleZipUpload(e.target.files[0])}
+            />
+          </label>
+        </div>
+      )}
+
       {phase === "key" && (
         <footer style={S.footer}>
           <div style={S.keyBox}>
             <p style={S.keyTitle}>$ connect your LLM to run this</p>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-  <p style={S.keySub}>your key is used for this session only — never logged or stored</p>
-  <button onClick={() => setShowHelp(!showHelp)} style={S.helpToggle}>
-    {showHelp ? "hide" : "don't have a key? →"}
-  </button>
-</div>
-{showHelp && (
-  <div style={S.helpBox}>
-    <p style={S.helpTitle}>getting a {provider} key:</p>
-    <ol style={S.helpList}>
-      {KEY_HELP[provider].steps.map((s, i) => <li key={i} style={S.helpItem}>{s}</li>)}
-    </ol>
-    <a href={KEY_HELP[provider].url} target="_blank" rel="noopener noreferrer" style={S.helpLink}>
-      open {provider === "claude" ? "console.anthropic.com" : provider === "openai" ? "platform.openai.com" : provider === "gemini" ? "aistudio.google.com" : "console.groq.com"} →
-    </a>
-  </div>
-)}
+              <p style={S.keySub}>your key is used for this session only — never logged or stored</p>
+              <button onClick={() => setShowHelp(!showHelp)} style={S.helpToggle}>
+                {showHelp ? "hide" : "don't have a key? →"}
+              </button>
+            </div>
+            {showHelp && (
+              <div style={S.helpBox}>
+                <p style={S.helpTitle}>getting a {provider} key:</p>
+                <ol style={S.helpList}>
+                  {KEY_HELP[provider].steps.map((s, i) => <li key={i} style={S.helpItem}>{s}</li>)}
+                </ol>
+                <a href={KEY_HELP[provider].url} target="_blank" rel="noopener noreferrer" style={S.helpLink}>
+                  open {provider === "claude" ? "console.anthropic.com" : provider === "openai" ? "platform.openai.com" : provider === "gemini" ? "aistudio.google.com" : "console.groq.com"} →
+                </a>
+              </div>
+            )}
             <div style={S.keyRow}>
               <div style={S.providerToggle}>
                 {["claude","openai","groq","gemini"].map(p => (
@@ -286,7 +318,7 @@ function ThinkingLine({ label = "thinking..." }) {
 function StepLine({ step }) {
   const icons = {
     step: "○", status: "○", extraction_done: "◆", diagnosis: "◆",
-    gate_blocked: "?", llm_done: "◆", repair_attempt: "↻",
+    gate_blocked: "?", llm_done: "◆", repair_attempt: "↻", tool_call: "📎",
     verification_done: "◆", interpretation_done: "✓",
   };
   const icon = icons[step.type] ?? "·";
@@ -298,6 +330,7 @@ function StepLine({ step }) {
         {step.data && step.type === "llm_done" && (
           <p style={L.stepTags}>
             model: {step.data.model} · in: {step.data.inputTokens} · out: {step.data.outputTokens}
+            {step.data.toolTurns > 0 && ` · tool turns: ${step.data.toolTurns}`}
           </p>
         )}
         {step.data && step.type === "extraction_done" && (
@@ -497,7 +530,6 @@ const T = {
   hair: "rgba(231,233,238,0.09)",
 };
 
-//key help
 const KEY_HELP = {
   claude: { steps: ["Go to console.anthropic.com", "Sign up or log in", "Click 'API Keys' → 'Create Key'", "Copy it and paste below"], url: "https://console.anthropic.com/settings/keys" },
   openai: { steps: ["Go to platform.openai.com", "Sign up or log in", "Click 'API keys' → 'Create new secret key'", "Copy it and paste below"], url: "https://platform.openai.com/api-keys" },
@@ -533,6 +565,8 @@ const S = {
   pills:        { display:"flex", gap:6, flexWrap:"wrap" },
   pill:         { fontFamily:MONO, fontSize:10, color:T.muted, border:`1px solid ${T.hair}`, borderRadius:5, padding:"3px 8px" },
   footer:       { borderTop:`1px solid ${T.hair}`, padding:"14px 28px", flexShrink:0 },
+  attachRow:    { padding:"0 28px 10px", maxWidth:720, margin:"0 auto", width:"100%" },
+  attachLabel:  { fontSize:11, color:T.amber, cursor:"pointer", fontFamily:MONO, display:"inline-block" },
   keyBox:       { maxWidth:720, margin:"0 auto" },
   keyTitle:     { fontSize:14, fontFamily:MONO, color:T.text, marginBottom:4 },
   keySub:       { fontSize:11, color:T.muted, marginBottom:12, fontFamily:MONO },
@@ -549,12 +583,12 @@ const S = {
   hintRow:      { maxWidth:720, margin:"6px auto 0", display:"flex", justifyContent:"space-between" },
   hint:         { fontSize:11, color:T.muted, fontFamily:MONO },
   skipBtn:      { fontSize:11, color:T.muted, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
-  helpToggle: { fontSize:11, color:T.amber, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
-  helpBox:    { marginTop:10, padding:"12px 14px", background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:8 },
-  helpTitle:  { fontSize:12, color:T.text, fontFamily:MONO, marginBottom:8 },
-  helpList:   { paddingLeft:18, marginBottom:10 },
-  helpItem:   { fontSize:12, color:T.muted, lineHeight:1.8 },
-  helpLink:   { fontSize:11, color:T.amber, fontFamily:MONO, textDecoration:"underline" },
+  helpToggle:   { fontSize:11, color:T.amber, background:"none", border:"none", cursor:"pointer", fontFamily:MONO },
+  helpBox:      { marginTop:10, padding:"12px 14px", background:T.panel2, border:`1px solid ${T.hair}`, borderRadius:8 },
+  helpTitle:    { fontSize:12, color:T.text, fontFamily:MONO, marginBottom:8 },
+  helpList:     { paddingLeft:18, marginBottom:10 },
+  helpItem:     { fontSize:12, color:T.muted, lineHeight:1.8 },
+  helpLink:     { fontSize:11, color:T.amber, fontFamily:MONO, textDecoration:"underline" },
 };
 
 const L = {

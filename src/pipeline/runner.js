@@ -9,28 +9,105 @@
  *    a diagnosis.
  * 2. ONE call to the user's real LLM:
  *    - "simple" bugs get a lightweight prompt — direct diagnose + fix, no
- *      evidence/confidence scaffolding (that structure is overkill for a
- *      one-line typo and dilutes its value where it actually matters).
+ *      evidence/confidence scaffolding.
  *    - "medium"/"complex" bugs get the full evidence/assumption/confidence
  *      prompt — the real LLM separates what it directly observed from what
- *      it's inferring, and self-reports confidence grounded in that split.
+ *      it's inferring, self-reports confidence, lists alternatives, and
+ *      self-critiques the fix (including stating its own runtime-scope
+ *      assumptions explicitly).
+ *    - If the session has an uploaded project (zip), the Gemini path routes
+ *      through an agentic tool-use loop (read_file/list_files) instead of a
+ *      plain one-shot call — the real LLM decides what to read, never the
+ *      cheap Groq model. Currently Gemini-only; other providers still get
+ *      the plain one-shot call even with files attached.
  *    Either way, if it's not confident, IT says so and asks a specific
  *    question, instead of a weak model guessing on its behalf.
- * 3. Deterministic npm registry check on whatever code it produced.
- * 4. Groq structures the raw response into the UI's action-plan shape.
+ * 3. Deterministic verification: syntax check, npm registry check, and
+ *    directional-intent contradiction check (fail-open/closed style
+ *    mismatches between what was asked and what the fix's config does).
+ * 4. Auto-repair: a rejected fix gets one automatic re-call to the same LLM
+ *    with the exact failure detail, before the user ever sees it.
+ * 5. Groq structures the final response into the UI's action-plan shape.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI    from "openai";
 import Groq      from "groq-sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+
 import { buildBrief, buildDiagnosticPrompt, buildSimpleDiagnosticPrompt, buildRepairPrompt } from "./extractor.js";
-import { readSessionFile, listFiles } from "./fileContext.js";
 import { verifyFix }         from "./fixVerifier.js";
 import { interpretResponse } from "./interpreter.js";
+import { readSessionFile, listFiles } from "./fileContext.js";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
 const MAX_REPAIR_ATTEMPTS = 1; // one automatic re-call on a rejected fix, capped for cost predictability
+const MAX_TOOL_TURNS = 5;      // cap on agentic read_file/list_files round-trips per diagnostic call
+
+// ── Gemini tool-use (agentic slice) ─────────────────────────────────────────
+const READ_FILE_TOOL = {
+  functionDeclarations: [{
+    name: "read_file",
+    description: "Read the contents of a file from the user's uploaded project.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Relative path to the file, from the list_files result." },
+      },
+      required: ["path"],
+    },
+  }, {
+    name: "list_files",
+    description: "List all files available in the user's uploaded project.",
+    parameters: { type: "object", properties: {} },
+  }],
+};
+
+const callGeminiWithTools = async (apiKey, promptText, sessionId, complexity, onStep) => {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const modelName = complexity === "complex" ? "gemini-pro-latest" : "gemini-flash-latest";
+  const model = genAI.getGenerativeModel({ model: modelName, tools: [READ_FILE_TOOL] });
+
+  const chat = model.startChat();
+  let response = await chat.sendMessage(promptText);
+  let turns = 0;
+
+  while (turns < MAX_TOOL_TURNS) {
+    const functionCalls = response.response.functionCalls();
+    if (!functionCalls || functionCalls.length === 0) break;
+
+    turns += 1;
+    const call = functionCalls[0];
+    onStep({ type: "tool_call", message: `Reading ${call.args?.path ?? "file list"}...`, data: call });
+
+    let toolResult;
+    if (call.name === "read_file") {
+      toolResult = readSessionFile(sessionId, call.args.path);
+    } else if (call.name === "list_files") {
+      toolResult = { files: listFiles(sessionId) };
+    } else {
+      toolResult = { error: `Unknown tool: ${call.name}` };
+    }
+
+    response = await chat.sendMessage([{
+      functionResponse: { name: call.name, response: toolResult },
+    }]);
+  }
+
+  const usage = response.response.usageMetadata;
+  onStep({
+    type: "llm_done", message: "Response received",
+    data: {
+      inputTokens: usage?.promptTokenCount ?? null,
+      outputTokens: usage?.candidatesTokenCount ?? null,
+      model: modelName,
+      toolTurns: turns,
+    },
+  });
+
+  return response.response.text();
+};
 
 // ── Call user's LLM ─────────────────────────────────────────────────────────
 const callUserLLM = async (provider, apiKey, promptText, complexity, sessionId, onStep) => {
@@ -99,11 +176,13 @@ Be as detailed as the task requires — do not truncate important information.`;
   }
 
   if (provider === "gemini") {
-    // If the session has an uploaded zip with files, route through the
-    // agentic tool-use path instead of a plain one-shot call.
+    // If the session has an uploaded project (zip), route through the
+    // agentic tool-use path instead of a plain one-shot call. The real
+    // Gemini model decides what to read — never the cheap Groq model.
     if (sessionId && listFiles(sessionId).length > 0) {
       return await callGeminiWithTools(apiKey, promptText, sessionId, complexity, onStep);
     }
+
     const genAI = new GoogleGenerativeAI(apiKey);
     const modelName = complexity === "complex" ? "gemini-pro-latest" : "gemini-flash-latest";
     const model = genAI.getGenerativeModel({
@@ -128,59 +207,6 @@ Be as detailed as the task requires — do not truncate important information.`;
   }
 
   throw new Error(`Unsupported provider: ${provider}`);
-};
-
-// ── Gemini tool-use (agentic slice) ─────────────────────────────────────────
-const READ_FILE_TOOL = {
-  functionDeclarations: [{
-    name: "read_file",
-    description: "Read the contents of a file from the user's uploaded project.",
-    parameters: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Relative path to the file, from the list_files result." },
-      },
-      required: ["path"],
-    },
-  }, {
-    name: "list_files",
-    description: "List all files available in the user's uploaded project.",
-    parameters: { type: "object", properties: {} },
-  }],
-};
-
-const MAX_TOOL_TURNS = 5;
-
-export const callGeminiWithTools = async (apiKey, promptText, sessionId, complexity, onStep) => {
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const modelName = complexity === "complex" ? "gemini-pro-latest" : "gemini-flash-latest";
-  const model = genAI.getGenerativeModel({ model: modelName, tools: [READ_FILE_TOOL] });
-
-  const chat = model.startChat();
-  let response = await chat.sendMessage(promptText);
-  let turns = 0;
-
-  while (turns < MAX_TOOL_TURNS) {
-    const functionCalls = response.response.functionCalls();
-    if (!functionCalls || functionCalls.length === 0) break;
-
-    turns += 1;
-    const call = functionCalls[0];
-    onStep({ type: "tool_call", message: `Reading ${call.args.path ?? "file list"}...`, data: call });
-
-    let toolResult;
-    if (call.name === "read_file") {
-      toolResult = readSessionFile(sessionId, call.args.path);
-    } else if (call.name === "list_files") {
-      toolResult = { files: listFiles(sessionId) };
-    }
-
-    response = await chat.sendMessage([{
-      functionResponse: { name: call.name, response: toolResult },
-    }]);
-  }
-
-  return response.response.text();
 };
 
 const isDebuggingTask = (ctx) => {
@@ -216,9 +242,9 @@ const detectClarificationRequest = (llmResponse) => {
 };
 
 // ── Main pipeline ──────────────────────────────────────────────────────────────
-// resume (optional): { clarificationAnswer } — set when this call is
-// resuming after the user answered the real LLM's own clarifying question.
-export const runPipeline = async (structuredContext, provider, apiKey, onStep, resume = null) => {
+// sessionId is threaded through so the Gemini tool-use path can look up
+// uploaded files for this specific session.
+export const runPipeline = async (structuredContext, provider, apiKey, sessionId, onStep, resume = null) => {
 
   // Simple-task bypass: non-debugging tasks skip the diagnostic framing
   // entirely and just get a direct, clean prompt.
@@ -229,7 +255,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
     }`.trim();
 
     onStep({ type: "step", step: 2, total: 2, message: "Calling your LLM..." });
-    const llmResponse = await callUserLLM(provider, apiKey, simplePrompt, "simple", onStep);
+    const llmResponse = await callUserLLM(provider, apiKey, simplePrompt, "simple", sessionId, onStep);
     const interpretation = await interpretResponse(
       llmResponse, { root_cause: structuredContext.goal, key_insight: null }, structuredContext, null, onStep
     );
@@ -242,10 +268,6 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
     return result;
   }
 
-  // If resuming after a clarification answer, the answer is already folded
-  // into structuredContext.existing_context by routes/pipeline.js — just
-  // proceed as a normal fresh call with the enriched context.
-
   // Step 1: Groq lays out the context (cheap, fast — compression + mechanical
   // complexity classification, not diagnostic judgment)
   onStep({ type: "step", step: 1, total: 4, message: "Laying out context..." });
@@ -253,13 +275,11 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
   const { brief, distinct_issue_count, complexity } = await buildBrief(structuredContext, onStep);
 
   // Step 2: ONE call to the user's real LLM — diagnoses, fixes, self-critiques.
-  // Simple mechanical bugs skip the evidence/confidence scaffolding entirely;
-  // medium/complex bugs get the full structured prompt.
   onStep({ type: "step", step: 2, total: 4, message: "Calling your LLM to diagnose and fix..." });
   const diagnosticPrompt = complexity === "simple"
     ? buildSimpleDiagnosticPrompt(brief)
     : buildDiagnosticPrompt(brief, distinct_issue_count);
-  const llmResponse = await callUserLLM(provider, apiKey, diagnosticPrompt, complexity, onStep);
+  const llmResponse = await callUserLLM(provider, apiKey, diagnosticPrompt, complexity, sessionId, onStep);
 
   // Check if the real LLM needs clarification instead of guessing
   const clarificationQuestion = detectClarificationRequest(llmResponse);
@@ -272,8 +292,8 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
     return result;
   }
 
- // Step 3: Deterministic npm + syntax check — the one fact-check worth keeping
-  onStep({ type: "step", step: 3, total: 4, message: "Checking code syntax and package imports..." });
+  // Step 3: Deterministic verification — syntax, npm, and directional intent
+  onStep({ type: "step", step: 3, total: 4, message: "Checking code syntax, package imports, and stated intent..." });
   let verification = await verifyFix(llmResponse, structuredContext, onStep);
   let finalResponse = llmResponse;
   let repairAttempts = 0;
@@ -281,7 +301,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
   // Auto-repair loop: if verification found a real, specific problem, feed
   // it back to the SAME LLM once and let it self-correct with actual error
   // detail — rather than showing the user a rejected fix it never got a
-  // chance to revise. Capped so cost stays predictable.
+  // chance to revise.
   while (verification.status === "rejected" && repairAttempts < MAX_REPAIR_ATTEMPTS) {
     repairAttempts += 1;
     onStep({
@@ -291,7 +311,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
     });
 
     const repairPrompt = buildRepairPrompt(finalResponse, verification.issues);
-    finalResponse = await callUserLLM(provider, apiKey, repairPrompt, complexity, onStep);
+    finalResponse = await callUserLLM(provider, apiKey, repairPrompt, complexity, sessionId, onStep);
     verification = await verifyFix(finalResponse, structuredContext, onStep);
   }
 
@@ -299,7 +319,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
   onStep({ type: "step", step: 4, total: 4, message: "Building your action plan..." });
   const interpretation = await interpretResponse(
     finalResponse,
-    { root_cause: null, key_insight: null }, // diagnosis now lives inside llmResponse itself, interpreter extracts it from the text
+    { root_cause: null, key_insight: null },
     structuredContext, verification, onStep
   );
 
@@ -317,6 +337,7 @@ export const runPipeline = async (structuredContext, provider, apiKey, onStep, r
   onStep({ type: "done", message: "Done", data: result });
   return result;
 };
+
 const estimateTokensSaved = (ctx, prompt) => {
   const rawLen      = (ctx.raw_intent ?? ctx.goal ?? "").length;
   const promptLen   = prompt.length;
