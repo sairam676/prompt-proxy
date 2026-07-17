@@ -16,6 +16,7 @@
  * be second-guessed the way a model's stylistic judgment can.
  */
 import { verifySyntax } from "./syntaxVerifier.js";
+import { checkIntentDirectionality } from "./intentChecker.js";
 
 const extractNpmImports = (code) => {
   const names = new Set();
@@ -59,20 +60,21 @@ const checkPackagesExist = async (packageNames) => {
 export const verifyFix = async (llmResponse, userContext, onStep) => {
   const packageNames = extractNpmImports(llmResponse);
   const syntaxResult = verifySyntax(llmResponse);
+  const intentIssues = checkIntentDirectionality(userContext, llmResponse);
 
-  onStep({ type: "status", message: "Checking code syntax and package imports..." });
+  onStep({ type: "status", message: "Checking code syntax, package imports, and stated intent..." });
 
   const npmIssues = packageNames.length ? await checkPackagesExist(packageNames) : [];
-  const allIssues = [...npmIssues, ...syntaxResult.issues];
+  const allIssues = [...npmIssues, ...syntaxResult.issues, ...intentIssues];
 
   const status = allIssues.length ? "rejected" : "verified";
 
   const verification = {
     status,
     issues: allIssues,
-   notes: allIssues.length
-  ? "One or more issues found — see details."
-  : "Code parses correctly and all imported packages exist. This does NOT confirm the fix resolves the described bug under real conditions.",
+    notes: allIssues.length
+      ? "One or more issues found — see details."
+      : "Code parses correctly, imports exist, and no directional intent contradiction was detected. This does NOT confirm the fix resolves the described bug under real runtime conditions.",
   };
 
   onStep({ type: "verification_done", message: `Fix check: ${status}`, data: verification });
