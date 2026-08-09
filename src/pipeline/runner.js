@@ -179,6 +179,8 @@ Be as detailed as the task requires — do not truncate important information.`;
     // If the session has an uploaded project (zip), route through the
     // agentic tool-use path instead of a plain one-shot call. The real
     // Gemini model decides what to read — never the cheap Groq model.
+     const filesForSession = sessionId ? listFiles(sessionId) : [];
+    console.log("[callUserLLM/gemini] sessionId at diagnosis:", sessionId, "| files found:", filesForSession);
     if (sessionId && listFiles(sessionId).length > 0) {
       return await callGeminiWithTools(apiKey, promptText, sessionId, complexity, onStep);
     }
@@ -216,6 +218,15 @@ const isDebuggingTask = (ctx) => {
 };
 
 /**
+ * needsVerification — decides whether the verification/auto-repair loop
+ * should run. Only useful for responses that contain code fixes — running
+ * syntax checks on a conceptual explanation is pure noise.
+ */
+const needsVerification = (ctx) => {
+  return isDebuggingTask(ctx);
+};
+
+/**
  * detectClarificationRequest — checks whether the real LLM's response is
  * asking for more information instead of proceeding on a guess. Two paths:
  * (1) it used the exact "NEEDS_CLARIFICATION:" prefix we asked for, or
@@ -246,39 +257,24 @@ const detectClarificationRequest = (llmResponse) => {
 // uploaded files for this specific session.
 export const runPipeline = async (structuredContext, provider, apiKey, sessionId, onStep, resume = null) => {
 
-  // Simple-task bypass: non-debugging tasks skip the diagnostic framing
-  // entirely and just get a direct, clean prompt.
-  if (!resume && !isDebuggingTask(structuredContext)) {
-    onStep({ type: "step", step: 1, total: 2, message: "Building prompt..." });
-    const simplePrompt = `Task: ${structuredContext.goal ?? structuredContext.raw_intent}\n\n${
-      structuredContext.constraints ? `Constraints: ${structuredContext.constraints}` : ""
-    }`.trim();
-
-    onStep({ type: "step", step: 2, total: 2, message: "Calling your LLM..." });
-    const llmResponse = await callUserLLM(provider, apiKey, simplePrompt, "simple", sessionId, onStep);
-    const interpretation = await interpretResponse(
-      llmResponse, { root_cause: structuredContext.goal, key_insight: null }, structuredContext, null, onStep
-    );
-
-    const result = {
-      blocked: false, diagnoses: [], surgicalPrompt: simplePrompt,
-      rawLLMResponse: llmResponse, interpretation, severity: "low", tokensSaved: 0,
-    };
-    onStep({ type: "done", message: "Done", data: result });
-    return result;
-  }
-
-  // Step 1: Groq lays out the context (cheap, fast — compression + mechanical
-  // complexity classification, not diagnostic judgment)
-  onStep({ type: "step", step: 1, total: 4, message: "Laying out context..." });
+  // Step 1: Groq lays out the context into a clean brief — runs for ALL
+  // tasks, not just debugging. This is where the middle LLM adds value:
+  // compressing, structuring, and classifying complexity so the user's
+  // main LLM gets a tight, complete prompt instead of raw unstructured text.
+  onStep({ type: "step", step: 1, total: needsVerification(structuredContext) ? 4 : 3, message: "Laying out context..." });
   console.log("STRUCTURED CONTEXT AT DIAGNOSIS TIME:", JSON.stringify(structuredContext, null, 2));
   const { brief, distinct_issue_count, complexity } = await buildBrief(structuredContext, onStep);
 
-  // Step 2: ONE call to the user's real LLM — diagnoses, fixes, self-critiques.
-  onStep({ type: "step", step: 2, total: 4, message: "Calling your LLM to diagnose and fix..." });
-  const diagnosticPrompt = complexity === "simple"
-    ? buildSimpleDiagnosticPrompt(brief)
-    : buildDiagnosticPrompt(brief, distinct_issue_count);
+  // Step 2: ONE call to the user's real LLM
+  const totalSteps = needsVerification(structuredContext) ? 4 : 3;
+  onStep({ type: "step", step: 2, total: totalSteps, message: isDebuggingTask(structuredContext) ? "Calling your LLM to diagnose and fix..." : "Calling your LLM..." });
+
+  const diagnosticPrompt = isDebuggingTask(structuredContext)
+    ? (complexity === "simple"
+        ? buildSimpleDiagnosticPrompt(brief)
+        : buildDiagnosticPrompt(brief, distinct_issue_count))
+    : brief; // Non-debug tasks: the brief IS the prompt — already compressed and structured
+
   const llmResponse = await callUserLLM(provider, apiKey, diagnosticPrompt, complexity, sessionId, onStep);
 
   // Check if the real LLM needs clarification instead of guessing
@@ -292,31 +288,37 @@ export const runPipeline = async (structuredContext, provider, apiKey, sessionId
     return result;
   }
 
-  // Step 3: Deterministic verification — syntax, npm, and directional intent
-  onStep({ type: "step", step: 3, total: 4, message: "Checking code syntax, package imports, and stated intent..." });
-  let verification = await verifyFix(llmResponse, structuredContext, onStep);
+  // Step 3 (debug tasks): Deterministic verification — syntax, npm, and directional intent
+  // Step 3 (non-debug tasks): Skip verification, go straight to interpretation
+  let verification = null;
   let finalResponse = llmResponse;
   let repairAttempts = 0;
 
-  // Auto-repair loop: if verification found a real, specific problem, feed
-  // it back to the SAME LLM once and let it self-correct with actual error
-  // detail — rather than showing the user a rejected fix it never got a
-  // chance to revise.
-  while (verification.status === "rejected" && repairAttempts < MAX_REPAIR_ATTEMPTS) {
-    repairAttempts += 1;
-    onStep({
-      type: "repair_attempt",
-      message: `Fix had an issue — asking your LLM to correct it (attempt ${repairAttempts})...`,
-      data: { issues: verification.issues },
-    });
+  if (needsVerification(structuredContext)) {
+    onStep({ type: "step", step: 3, total: 4, message: "Checking code syntax, package imports, and stated intent..." });
+    verification = await verifyFix(llmResponse, structuredContext, onStep);
 
-    const repairPrompt = buildRepairPrompt(finalResponse, verification.issues);
-    finalResponse = await callUserLLM(provider, apiKey, repairPrompt, complexity, sessionId, onStep);
-    verification = await verifyFix(finalResponse, structuredContext, onStep);
+    // Auto-repair loop: if verification found a real, specific problem, feed
+    // it back to the SAME LLM once and let it self-correct with actual error
+    // detail — rather than showing the user a rejected fix it never got a
+    // chance to revise.
+    while (verification.status === "rejected" && repairAttempts < MAX_REPAIR_ATTEMPTS) {
+      repairAttempts += 1;
+      onStep({
+        type: "repair_attempt",
+        message: `Fix had an issue — asking your LLM to correct it (attempt ${repairAttempts})...`,
+        data: { issues: verification.issues },
+      });
+
+      const repairPrompt = buildRepairPrompt(finalResponse, verification.issues);
+      finalResponse = await callUserLLM(provider, apiKey, repairPrompt, complexity, sessionId, onStep);
+      verification = await verifyFix(finalResponse, structuredContext, onStep);
+    }
   }
 
-  // Step 4: Structure the response for the UI (cheap, fast — formatting not judgment)
-  onStep({ type: "step", step: 4, total: 4, message: "Building your action plan..." });
+  // Final step: Structure the response for the UI (cheap, fast — formatting not judgment)
+  const stepNum = needsVerification(structuredContext) ? 4 : 3;
+  onStep({ type: "step", step: stepNum, total: totalSteps, message: "Building your action plan..." });
   const interpretation = await interpretResponse(
     finalResponse,
     { root_cause: null, key_insight: null },

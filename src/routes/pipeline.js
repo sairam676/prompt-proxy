@@ -52,41 +52,26 @@ router.post("/start", async (req, res) => {
     const sessionId = uuidv4();
     const session = await createSession(sessionId, message.trim());
     const taskType = await classifyTaskType(message, mode);
+    // Store task type for pipeline decisions later — but don't bypass the
+    // interview based on it. The interviewer itself decides whether to ask
+    // questions or proceed immediately based on context sufficiency.
+    // A clear "explain closures in JS" → interviewer sees it's complete, emits
+    // JSON immediately (no questions, same speed). A vague "help me with my
+    // project" → interviewer asks what kind of help.
     session.taskType = taskType;
 
     // Deterministic pre-check: only for explicitly fenced (```) code
-    // blocks. Raw unfenced text is NOT guessed at — that heuristic kept
-    // false-positiving on ordinary English (apostrophes, the word
-    // "function" used as a noun, prose mixed with code). Fenced blocks are
-    // an unambiguous signal the user intentionally marked as code.
-    if (taskType === "debug") {
-      const syntaxCheck = verifySyntax(message);
-      if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
-        return res.json({
-          sessionId,
-          status: "complete_syntax_only",
-          syntaxIssues: syntaxCheck.issues,
-          message: "Found a syntax error directly — no need to call your LLM for this one.",
-        });
-      }
-    }
-
-    // General/conceptual questions skip the interview entirely — there's
-    // no code to gather context on, no error to reproduce.
-    if (taskType === "general") {
-      session.structuredContext = {
-        goal: message.trim(),
-        existing_context: null,
-        already_tried: null,
-        expected_output: null,
-        constraints: null,
-        domain: null,
-        raw_intent: message.trim(),
-        complexity: "simple",
-      };
-      session.status = "complete";
-      await saveSession(sessionId, session);
-      return res.json({ sessionId, status: "complete", taskType });
+    // blocks. If we can catch a pure syntax error without calling any LLM,
+    // do it. Not gated on taskType — fenced code blocks are an unambiguous
+    // signal regardless of classification.
+    const syntaxCheck = verifySyntax(message);
+    if (syntaxCheck.checked && syntaxCheck.issues.length > 0) {
+      return res.json({
+        sessionId,
+        status: "complete_syntax_only",
+        syntaxIssues: syntaxCheck.issues,
+        message: "Found a syntax error directly — no need to call your LLM for this one.",
+      });
     }
 
     const result = await runInterviewTurn(message, []);

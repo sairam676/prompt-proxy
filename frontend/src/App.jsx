@@ -135,8 +135,8 @@ export default function App() {
           <span style={S.mark}>PP</span>
           <span style={S.name}>PromptProxy</span>
         </div>
-        <span style={S.tagline}><span style={S.liveDot}></span>diagnostic session</span>
-        {phase === "done" && <button style={S.newBtn} onClick={reset}>new session →</button>}
+        <span style={S.tagline}><span style={S.liveDot}></span>session active</span>
+        {(phase === "done" || phase === "error") && <button style={S.newBtn} onClick={reset}>new session →</button>}
       </nav>
 
       <main style={S.main}>
@@ -150,10 +150,11 @@ export default function App() {
             <div style={S.terminalBody}>
               {messages.length === 0 && phase === "idle" && steps.length === 0 && !result && (
                 <div style={S.empty}>
-                  <p style={S.emptyPrompt}>$ what are you stuck on?</p>
+                  <p style={S.emptyPrompt}>$ what do you need?</p>
                   <p style={S.emptyB}>
-                    Paste your problem, error, or task. We extract the full context,
-                    identify the root cause, then send one perfect prompt to your LLM.
+                    Debug a bug, review code, prep for an interview, or ask anything.
+                    We extract the right context, build a sharp prompt, and send one
+                    optimized call to your LLM — no hallucination, no guesswork.
                   </p>
                   <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
                     <button
@@ -170,7 +171,7 @@ export default function App() {
                     </button>
                   </div>
                   <div style={S.pills}>
-                    {["root cause identified","one LLM call","clear next action","any domain"].map(p => (
+                    {["context extraction","one optimized LLM call","clear next action","debug · review · learn · anything"].map(p => (
                       <span key={p} style={S.pill}>{p}</span>
                     ))}
                   </div>
@@ -268,7 +269,7 @@ export default function App() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKey}
-              placeholder={phase === "idle" ? "paste your problem, error, code, or task..." : "your answer..."}
+              placeholder={phase === "idle" ? "paste your problem, code, question, or task..." : "your answer..."}
               disabled={inputDisabled}
               rows={2}
             />

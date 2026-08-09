@@ -20,6 +20,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next"]);
 export const extractZipForSession = (sessionId, zipBuffer) => {
   const sessionDir = path.join(EXTRACT_ROOT, sessionId);
   fs.mkdirSync(sessionDir, { recursive: true });
+   console.log("[extractZipForSession] writing to:", sessionDir);
 
   const zip = new AdmZip(zipBuffer);
   zip.extractAllTo(sessionDir, true);
@@ -29,6 +30,7 @@ export const extractZipForSession = (sessionId, zipBuffer) => {
 
 export const listFiles = (sessionId, maxFiles = 200) => {
   const sessionDir = path.join(EXTRACT_ROOT, sessionId);
+  console.log("[listFiles] checking:", sessionDir, "| exists:", fs.existsSync(sessionDir));
   if (!fs.existsSync(sessionDir)) return [];
 
   const results = [];
